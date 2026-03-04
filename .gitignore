@@ -1,0 +1,13 @@
+.gradle
+/build
+/app/build
+*.iml
+.idea
+local.properties
+.DS_Store
+/captures
+.externalNativeBuild
+.cxx
+/F5-TTS-ONNX-main
+/F5_Spanish_Model
+exportar_f5_es_onnx.py
