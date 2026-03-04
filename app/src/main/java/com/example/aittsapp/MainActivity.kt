@@ -71,25 +71,39 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnTestVoice.setOnClickListener {
-            val text = etTestText.text.toString()
+            val text = etTestText?.text.toString()
+            if (text.isEmpty()) return@setOnClickListener
+            
             lifecycleScope.launch {
                 val all = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
-                if (selectedVoiceIndex < all.size) {
-                    Toast.makeText(this@MainActivity, "Generando audio...", Toast.LENGTH_SHORT).show()
+                if (selectedVoiceIndex >= 0 && selectedVoiceIndex < all.size) {
+                    val profile = all[selectedVoiceIndex]
+                    Toast.makeText(this@MainActivity, "Probando voz: " + profile.name, Toast.LENGTH_SHORT).show()
+                    
                     val pcm = withContext(Dispatchers.Default) { 
-                        voiceCloner.synthesizeForTest(text, all[selectedVoiceIndex]) 
+                        voiceCloner.synthesizeForTest(text, profile) 
                     }
-                    pcm?.let { audioPlayer.playPcm(it) }
+                    
+                    if (pcm != null && pcm.isNotEmpty()) {
+                        audioPlayer.playPcm(pcm)
+                    } else {
+                        Toast.makeText(this@MainActivity, "Error: La IA no generó audio", Toast.LENGTH_LONG).show()
+                    }
                 }
             }
         }
 
-        btnSystemSettings.setOnClickListener { startActivity(Intent("com.android.settings.TTS_SETTINGS")) }
+        btnSystemSettings.setOnClickListener { 
+            startActivity(Intent("com.android.settings.TTS_SETTINGS")) 
+        }
 
-        adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_single_choice, voiceNames)
+        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_single_choice, voiceNames)
         listView.adapter = adapter
         listView.choiceMode = ListView.CHOICE_MODE_SINGLE
-        listView.setOnItemClickListener { _, _, position, _ -> selectedVoiceIndex = position }
+        listView.setOnItemClickListener { _, _, position, _ -> 
+            selectedVoiceIndex = position 
+            Toast.makeText(this, "Voz seleccionada para test", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -112,22 +126,26 @@ class MainActivity : AppCompatActivity() {
                 setOutputFormat(MediaRecorder.OutputFormat.AMR_WB)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AMR_WB)
                 setOutputFile(audioFile!!.absolutePath)
-                prepare(); start()
+                prepare()
+                start()
             }
             findViewById<Button>(R.id.btnRecordVoice).text = "Detener Grabación"
-        } catch (e: Exception) { isRecording = false }
+        } catch (e: Exception) { 
+            isRecording = false 
+            Toast.makeText(this, "Error al usar mic", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun stopRecording() {
         isRecording = false
         recorder?.apply { stop(); release() }
         recorder = null
-        findViewById<Button>(R.id.btnRecordVoice).text = "Grabar/Subir 30s de audio"
+        findViewById<Button>(R.id.btnRecordVoice).text = "Grabar Micrófono"
     }
 
     private fun processVoiceCloning() {
         lifecycleScope.launch {
-            Toast.makeText(this@MainActivity, "Analizando identidad vocal...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this@MainActivity, "IA analizando voz chilena...", Toast.LENGTH_SHORT).show()
             val embedding = voiceCloner.cloneFromAudio(audioFile!!)
             if (embedding != null) {
                 voiceManager.saveClonedVoice(embedding)
@@ -140,11 +158,14 @@ class MainActivity : AppCompatActivity() {
     private fun refreshVoiceList() {
         val allVoices = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
         voiceNames.clear()
-        allVoices.forEach { 
-            val type = if (it.isCloned) "Clonada" else "Base"
-            voiceNames.add("\${it.name} (\$type)") 
+        for (profile in allVoices) {
+            val typeStr = if (profile.isCloned) "Clonada" else "Base"
+            voiceNames.add(profile.name + " (" + typeStr + ")")
         }
-        if (::adapter.isInitialized) adapter.notifyDataSetChanged()
+        if (::adapter.isInitialized) {
+            adapter.notifyDataSetChanged()
+            findViewById<ListView>(R.id.listViewVoices).setItemChecked(selectedVoiceIndex, true)
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
