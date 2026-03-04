@@ -1,6 +1,9 @@
 package com.example.aittsapp.engine
 
 import androidx.lifecycle.MutableLiveData
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Gestor de logs visuales para depuración en tiempo real.
@@ -10,9 +13,8 @@ object LogManager {
     private val fullLog = StringBuilder()
 
     fun log(message: String) {
-        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
-        val formattedMessage = "[\$timestamp] \$message
-"
+        val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        val formattedMessage = "[$timestamp] $message\n"
         fullLog.insert(0, formattedMessage) // Los más nuevos arriba
         logUpdates.postValue(fullLog.toString())
     }
