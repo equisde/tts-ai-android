@@ -48,10 +48,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="F5-TTS AI Server", lifespan=lifespan)
 
 def align_tensor(session, input_name, data):
-    """Detecta tipo y forma (shape) esperada por ONNX y alinea los datos de forma agresiva."""
+    """Detecta tipo y forma (shape) esperada por ONNX y alinea los datos."""
     for inp in session.get_inputs():
         if input_name in inp.name:
-            # 1. Alineación de TIPO
             if 'int16' in inp.type:
                 data = (data * 32767).astype(np.int16) if data.dtype == np.float32 else data.astype(np.int16)
             elif 'float' in inp.type:
@@ -61,21 +60,16 @@ def align_tensor(session, input_name, data):
             elif 'int32' in inp.type:
                 data = data.astype(np.int32)
             
-            # 2. Alineación de DIMENSIONES (Shape)
-            expected_shape = inp.shape # Ej: [1, 1, 'seq', 64]
-            actual_shape = data.shape   # Ej: [1, 1, 64, 260]
+            expected_shape = inp.shape
+            actual_shape = data.shape
             
             if len(expected_shape) == len(actual_shape):
-                # Caso común: Dimensiones finales invertidas en RoPE
-                # Buscamos una discrepancia donde el valor fijo esperado está en otra posición
                 for i in range(len(expected_shape)):
                     expected_dim = expected_shape[i]
                     if isinstance(expected_dim, int) and expected_dim > 0:
                         if expected_dim != actual_shape[i]:
-                            # Buscamos si el valor está en otro índice
                             for j in range(len(actual_shape)):
                                 if actual_shape[j] == expected_dim:
-                                    print(f"ALERTA: Transponiendo {input_name} para coincidir con {expected_shape} (tenía {actual_shape})")
                                     axes = list(range(len(actual_shape)))
                                     axes[i], axes[j] = axes[j], axes[i]
                                     return np.transpose(data, axes)
@@ -117,12 +111,13 @@ async def synthesize(data: str = Form(...), audio: UploadFile = File(None)):
     noise = pre_outs[0]
     ref_len = pre_outs[7]
     
-    # ETAPA B: TRANSFORMER (Difusión con alineación de soporte)
+    # ETAPA B: TRANSFORMER (Difusión con límite de pasos corregido)
     try:
-        # Los tensores de soporte son del 1 al 6 en las salidas de Preprocess
         support_tensors = pre_outs[1:7]
+        # FIX: El modelo ONNX tiene un límite de 31 pasos (0 a 30). Usamos 30 para seguridad.
+        steps = 30 
         
-        for step in range(32):
+        for step in range(steps):
             trans_inputs = {}
             support_idx = 0
             for inp in models["sess_trans"].get_inputs():
@@ -131,7 +126,6 @@ async def synthesize(data: str = Form(...), audio: UploadFile = File(None)):
                 elif 'time_step' in inp.name: 
                     trans_inputs[inp.name] = align_tensor(models["sess_trans"], inp.name, np.array([step]))
                 else:
-                    # Tensores de soporte (cos/sin/mel)
                     if support_idx < len(support_tensors):
                         val = support_tensors[support_idx]
                         trans_inputs[inp.name] = align_tensor(models["sess_trans"], inp.name, val)
