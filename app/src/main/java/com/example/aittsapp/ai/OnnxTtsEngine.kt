@@ -1,8 +1,10 @@
 package com.example.aittsapp.ai
 
+import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.TensorInfo
 import android.content.Context
 import android.util.Log
 import com.example.aittsapp.engine.LogManager
@@ -32,9 +34,19 @@ class OnnxTtsEngine : TtsEngine {
             sessionPre = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Preprocess.onnx").absolutePath, options)
             sessionTrans = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Transformer.onnx").absolutePath, options)
             sessionDec = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Decode.onnx").absolutePath, options)
+            
             isReady = (sessionPre != null && sessionTrans != null && sessionDec != null)
-            LogManager.log("IA Lista para sintetizar: " + isReady)
+            if (isReady) inspectModels()
+            LogManager.log("IA Lista. Auto-detección de tipos activada.")
         } catch (e: Exception) { LogManager.log("ERROR INIT: " + e.message) }
+    }
+
+    private fun inspectModels() {
+        // Log para saber qué esperan los modelos
+        sessionPre?.inputInfo?.forEach { (name, info) ->
+            val type = (info.info as? TensorInfo)?.type
+            LogManager.log("Model Input [\$name]: \$type")
+        }
     }
 
     override fun synthesize(text: String, profile: VoiceProfile): ByteArray? {
@@ -45,62 +57,67 @@ class OnnxTtsEngine : TtsEngine {
             val audioData = loadRawAudio(profile.referenceAudio)
             val maxDuration = (audioData.size / 512 + 1 + text.length * 2).toLong()
 
-            // REINTENTO INTELIGENTE DE TIPO DE DATO
-            return trySynthesize(env, tokens, audioData, maxDuration)
-        } catch (e: Exception) {
-            LogManager.log("ERROR SÍNTESIS: " + e.message)
-            return null
-        }
-    }
+            // 1. Preparar Tensores para Etapa A (Preprocess) con auto-conversión
+            val audioTensor = createAutoTensor(env, "audio", sessionPre!!, audioData)
+            val tokenTensor = createAutoTensor(env, "text_ids", sessionPre!!, tokens)
+            val durationTensor = createAutoTensor(env, "max_duration", sessionPre!!, longArrayOf(maxDuration))
 
-    private fun trySynthesize(env: OrtEnvironment, tokens: LongArray, audioData: ByteArray, maxDuration: Long): ByteArray? {
-        // Intentar primero con Float32 (Estándar IA)
-        try {
-            LogManager.log("Intentando con Float32...")
-            val floats = bytesToFloats(audioData)
-            return runPipeline(env, tokens, floats, maxDuration)
-        } catch (e: Exception) {
-            val msg = e.message ?: ""
-            if (msg.contains("int16", ignoreCase = true)) {
-                LogManager.log("Detectado requerimiento Int16. Reintentando...")
-                val shorts = bytesToShorts(audioData)
-                return runPipeline(env, tokens, shorts, maxDuration)
+            val preInputs = mutableMapOf<String, OnnxTensor>()
+            audioTensor?.let { preInputs["audio"] = it }
+            tokenTensor?.let { preInputs["text_ids"] = it }
+            durationTensor?.let { preInputs["max_duration"] = it }
+
+            val preResults = sessionPre?.run(preInputs) ?: return null
+            var noise = preResults.get(0) as OnnxTensor
+            
+            // 2. Bucle de Difusión (16 pasos)
+            var timeStepVal = 0L
+            for (step in 0 until 16) {
+                val timeTensor = createAutoTensor(env, "time_step", sessionTrans!!, longArrayOf(timeStepVal))
+                val transInputs = mutableMapOf("noise" to noise)
+                timeTensor?.let { transInputs["time_step"] = it }
+                
+                val transResults = sessionTrans?.run(transInputs) ?: break
+                val nextNoise = transResults.get(0) as OnnxTensor
+                if (step > 0) noise.close()
+                timeTensor?.close()
+                noise = nextNoise
+                timeStepVal++
             }
-            LogManager.log("Fallo en reintento: " + msg)
+
+            // 3. Decodificación
+            val decResults = sessionDec?.run(mapOf("denoised" to noise)) ?: return null
+            return convertToPcm(decResults.get(0).value)
+        } catch (e: Exception) {
+            LogManager.log("ERROR IA: " + e.message)
             return null
         }
     }
 
-    private fun runPipeline(env: OrtEnvironment, tokens: LongArray, audio: Any, maxDuration: Long): ByteArray? {
-        // Generar Tensor dinámico según el tipo detectado
-        val audioTensor = when (audio) {
-            is FloatArray -> OnnxTensor.createTensor(env, FloatBuffer.wrap(audio), longArrayOf(1, 1, audio.size.toLong()))
-            is ShortArray -> OnnxTensor.createTensor(env, ShortBuffer.wrap(audio), longArrayOf(1, 1, audio.size.toLong()))
-            else -> return null
+    private fun createAutoTensor(env: OrtEnvironment, inputName: String, session: OrtSession, data: Any): OnnxTensor? {
+        val info = session.inputInfo[inputName]?.info as? TensorInfo ?: return null
+        val expectedType = info.type
+        val shape = info.shape
+
+        return when (expectedType) {
+            OnnxJavaType.FLOAT -> {
+                val floats = if (data is FloatArray) data else bytesToFloats(data as? ByteArray ?: ByteArray(0))
+                OnnxTensor.createTensor(env, FloatBuffer.wrap(floats), longArrayOf(1, 1, floats.size.toLong()))
+            }
+            OnnxJavaType.INT16 -> {
+                val shorts = if (data is ShortArray) data else bytesToShorts(data as? ByteArray ?: ByteArray(0))
+                OnnxTensor.createTensor(env, ShortBuffer.wrap(shorts), longArrayOf(1, 1, shorts.size.toLong()))
+            }
+            OnnxJavaType.INT64 -> {
+                val longs = if (data is LongArray) data else longArrayOf((data as? Int)?.toLong() ?: 0L)
+                OnnxTensor.createTensor(env, LongBuffer.wrap(longs), longArrayOf(1, longs.size.toLong()))
+            }
+            OnnxJavaType.INT32 -> {
+                val ints = if (data is LongArray) data.map { it.toInt() }.toIntArray() else intArrayOf((data as? Int) ?: 0)
+                OnnxTensor.createTensor(env, IntBuffer.wrap(ints), longArrayOf(1, ints.size.toLong()))
+            }
+            else -> null
         }
-
-        val preInputs = mapOf(
-            "audio" to audioTensor,
-            "text_ids" to OnnxTensor.createTensor(env, LongBuffer.wrap(tokens), longArrayOf(1, tokens.size.toLong())),
-            "max_duration" to OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(maxDuration)), longArrayOf(1))
-        )
-
-        val preResults = sessionPre?.run(preInputs) ?: return null
-        var noise = preResults.get(0) as OnnxTensor
-        
-        // Bucle de Difusión (16 pasos)
-        var timeStep = OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(0)), longArrayOf(1))
-        for (step in 0 until 16) {
-            val transResults = sessionTrans?.run(mapOf("noise" to noise, "time_step" to timeStep)) ?: break
-            val nextNoise = transResults.get(0) as OnnxTensor
-            val nextTime = transResults.get(1) as OnnxTensor
-            if (step > 0) { noise.close(); timeStep.close() }
-            noise = nextNoise
-            timeStep = nextTime
-        }
-
-        val decResults = sessionDec?.run(mapOf("denoised" to noise)) ?: return null
-        return convertToPcm(decResults.get(0).value)
     }
 
     private fun loadRawAudio(file: File?): ByteArray {
