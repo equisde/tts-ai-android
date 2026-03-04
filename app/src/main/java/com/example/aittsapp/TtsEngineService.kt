@@ -113,7 +113,10 @@ class TtsEngineService : TextToSpeechService() {
                 try {
                     val sentences = processedText.split(Regex("(?<=[.!?])\\s+"))
                     sentences.forEach { sentence ->
-                        val pcmData = ttsEngine.synthesize(sentence, selectedProfile)
+                        // runBlocking es seguro aquí porque estamos en un hilo secundario propio
+                        val pcmData = kotlinx.coroutines.runBlocking { 
+                            ttsEngine.synthesize(sentence, selectedProfile) 
+                        }
                         if (pcmData != null) {
                             callback.audioAvailable(pcmData, 0, pcmData.size)
                         }
