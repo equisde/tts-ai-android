@@ -5,11 +5,15 @@ import android.speech.tts.SynthesisCallback
 import android.speech.tts.SynthesisRequest
 import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeechService
+import android.speech.tts.Voice
 import android.util.Log
 import com.example.aittsapp.ai.OnnxTtsEngine
 import com.example.aittsapp.ai.TtsEngine
 import com.example.aittsapp.ai.VoiceManager
 import com.example.aittsapp.ai.VoiceProfile
+import com.example.aittsapp.ai.Gender
+import com.example.aittsapp.engine.ChileanPreProcessor
+import java.util.Locale
 
 class TtsEngineService : TextToSpeechService() {
 
@@ -19,16 +23,12 @@ class TtsEngineService : TextToSpeechService() {
     
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "Inicializando motor AI TTS LLM para Android 15")
-        
-        // Inicialización modular
         voiceManager = VoiceManager(applicationContext)
         ttsEngine = OnnxTtsEngine()
         ttsEngine.initialize(applicationContext)
     }
 
     override fun onIsLanguageAvailable(lang: String?, country: String?, variant: String?): Int {
-        // Soporte estricto para Español Chileno
         if (lang == "spa" && (country == "CHL" || country == "CHL".lowercase())) {
             return TextToSpeech.LANG_COUNTRY_AVAILABLE
         }
@@ -43,8 +43,37 @@ class TtsEngineService : TextToSpeechService() {
         return onIsLanguageAvailable(lang, country, variant)
     }
 
+    /**
+     * Reporta las voces reales al sistema Android.
+     */
+    override fun onGetVoices(): MutableList<Voice> {
+        val voices = mutableListOf<Voice>()
+        val allProfiles = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
+        
+        allProfiles.forEach { profile ->
+            val locale = Locale("es", "CL")
+            val features = mutableSetOf<String>()
+            if (profile.isCloned) features.add(TextToSpeech.Engine.KEY_FEATURE_NETWORK_RETTIMEOUT) // Solo como marcador
+            
+            voices.add(Voice(
+                profile.id,
+                locale,
+                Voice.QUALITY_VERY_HIGH,
+                Voice.LATENCY_NORMAL,
+                false,
+                features
+            ))
+        }
+        return voices
+    }
+
+    override fun onIsValidVoiceName(voiceName: String?): Int {
+        val all = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
+        return if (all.any { it.id == voiceName }) TextToSpeech.SUCCESS else TextToSpeech.ERROR
+    }
+
     override fun onStop() {
-        Log.i(TAG, "Deteniendo síntesis de voz.")
+        Log.i(TAG, "Parada solicitada por el sistema.")
     }
 
     override fun onDestroy() {
@@ -55,37 +84,35 @@ class TtsEngineService : TextToSpeechService() {
     override fun onSynthesizeText(request: SynthesisRequest?, callback: SynthesisCallback?) {
         if (request == null || callback == null) return
         
-        val text = request.charSequenceText.toString()
+        // 1. Pre-procesar el texto para naturalidad chilena
+        val rawText = request.charSequenceText.toString()
+        val processedText = ChileanPreProcessor.process(rawText)
         
-        // Leer la preferencia del usuario desde los ajustes
-        val sharedPrefs = getSharedPreferences("TTS_PREFS", android.content.Context.MODE_PRIVATE)
-        val defaultVoiceId = sharedPrefs.getString("DEFAULT_VOICE_ID", "cl-female-base")
-        
-        // El sistema puede solicitar una voz específica, si no, usamos la elegida por el usuario
-        val voiceName = request.voiceName ?: defaultVoiceId
+        // 2. Obtener configuración de voz (ajustada por el usuario en el sistema)
+        val voiceName = request.voiceName ?: getSharedPreferences("TTS_PREFS", MODE_PRIVATE).getString("DEFAULT_VOICE_ID", "cl-female-base")
+        val pitch = request.pitch // El sistema puede pedir cambio de tono
+        val speechRate = request.speechRate // El sistema puede pedir cambio de velocidad
 
-        // 1. Buscar el perfil de voz (Base o Clonada)
         val allVoices = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
-        val selectedProfile = allVoices.find { it.id == voiceName } ?: allVoices.find { it.id == defaultVoiceId } ?: allVoices[0]
+        val selectedProfile = allVoices.find { it.id == voiceName } ?: allVoices[0]
 
-        // 2. Configuración de audio profesional (24kHz es estándar para IA de alta calidad)
+        // 3. Informar al sistema de la configuración de audio
         val sampleRate = 24000
         callback.start(sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
 
         try {
-            // 3. Ejecutar Inferencia de IA (Modelo LLM TTS)
-            val pcmData = ttsEngine.synthesize(text, selectedProfile)
+            // 4. Inferencia por fragmentos (para textos largos)
+            val sentences = processedText.split(Regex("(?<=[.!?])\\s+"))
             
-            if (pcmData != null) {
-                // Enviar el audio generado al sistema Android
-                callback.audioAvailable(pcmData, 0, pcmData.size)
-                callback.done()
-                Log.d(TAG, "Síntesis completada con éxito para perfil: \${selectedProfile.name}")
-            } else {
-                callback.error()
+            sentences.forEach { sentence ->
+                val pcmData = ttsEngine.synthesize(sentence, selectedProfile)
+                if (pcmData != null) {
+                    callback.audioAvailable(pcmData, 0, pcmData.size)
+                }
             }
+            callback.done()
         } catch (e: Exception) {
-            Log.e(TAG, "Error crítico en síntesis", e)
+            Log.e(TAG, "Error en síntesis del sistema", e)
             callback.error()
         }
     }
