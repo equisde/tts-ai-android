@@ -18,7 +18,7 @@ models = {"vocab": {}, "sess_pre": None, "sess_trans": None, "sess_dec": None, "
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("=== Iniciando Servidor TTS (Matemática de Difusión Corregida) ===")
+    print("=== Iniciando Servidor TTS (Solver ODE Fix) ===")
     models["whisper"] = whisper.load_model("base")
     vocab_path = os.path.join(MODEL_DIR, "vocab.txt")
     if os.path.exists(vocab_path):
@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
             models["sess_pre"] = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Preprocess.onnx"), opts)
             models["sess_trans"] = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Transformer.onnx"), opts)
             models["sess_dec"] = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Decode.onnx"), opts)
-            print("Modelos cargados exitosamente.")
+            print("Modelos cargados.")
         except Exception as e: print(f"Error carga: {e}")
     yield
 
@@ -57,18 +57,6 @@ def align_and_cast(session, input_name, data):
             return data
     return data
 
-@app.post("/clone")
-async def clone(data: str = Form(...), audio: UploadFile = File(...)):
-    req = json.loads(data)
-    voice_id = req.get("voice_id", "voice")
-    p_audio = os.path.join(PROFILES_DIR, f"{voice_id}.wav")
-    p_text = os.path.join(PROFILES_DIR, f"{voice_id}.txt")
-    with open(p_audio, "wb") as f: f.write(await audio.read())
-    result = models["whisper"].transcribe(p_audio, language="es")
-    ref_text = result["text"].strip()
-    with open(p_text, "w", encoding="utf-8") as f: f.write(ref_text)
-    return {"status": "success", "transcription": ref_text}
-
 @app.post("/synthesize")
 async def synthesize(data: str = Form(...)):
     req = json.loads(data)
@@ -89,6 +77,7 @@ async def synthesize(data: str = Form(...)):
     tokens = np.array([models["vocab"].get(c, 0) for c in full_text], dtype=np.int64)
     max_dur = np.array([int(len(ref_audio)/256 + 1 + len(gen_text)*2.5)], dtype=np.int64)
     
+    # ETAPA A
     pre_in = {}
     for inp in models["sess_pre"].get_inputs():
         if 'audio' in inp.name: pre_in[inp.name] = align_and_cast(models["sess_pre"], 'audio', np.expand_dims(ref_audio, axis=(0,1)))
@@ -101,31 +90,46 @@ async def synthesize(data: str = Form(...)):
     noise = pre_outs_list[0]
     ref_len = pre_outs_list[7]
     
-    # --- ETAPA B: TRANSFORMER CON MÉTODO DE EULER (CORRECCIÓN RUIDO) ---
+    # --- ETAPA B: TRANSFORMER (FIX 8-BIT / EDM NOISE) ---
     steps = 30
+    # Diferencial de tiempo real
     dt = 1.0 / steps
+    
     for step in range(steps):
+        # NORMALIZACIÓN DEL TIEMPO (Crucial para estabilidad)
+        t_normalized = float(step) / steps
+        
         trans_in = {}
         for i, inp in enumerate(models["sess_trans"].get_inputs()):
             if 'noise' in inp.name: trans_in[inp.name] = noise
             elif 'time_step' in inp.name:
-                val = np.array([step], dtype=np.float32 if 'float' in inp.type else np.int64)
+                # Probamos con tiempo normalizado Float32
+                val = np.array([t_normalized], dtype=np.float32)
                 trans_in[inp.name] = align_and_cast(models["sess_trans"], 'time_step', val)
             else:
                 match_val = next((v for k, v in pre_outs_dict.items() if k in inp.name or inp.name in k), None)
                 if match_val is not None: trans_in[inp.name] = align_and_cast(models["sess_trans"], inp.name, match_val)
         
-        # El modelo devuelve la VELOCIDAD del flujo (Flow)
+        # Inferencia de velocidad
         flow_velocity = models["sess_trans"].run(None, trans_in)[0]
-        # APLICAMOS INTEGRACIÓN: ruido_nuevo = ruido_actual + (velocidad * diferencial_tiempo)
+        # Integración de Euler refinada
         noise = noise + (flow_velocity * dt)
         
+    # ETAPA C: DECODE
     audio_out = models["sess_dec"].run(None, {"denoised": noise, "ref_signal_len": ref_len})[0]
+    
+    # SALIDA DE AUDIO LIMPIA
     audio_flat = audio_out.flatten().astype(np.float32)
+    # Aplicar un pequeño fade-in/out para suavizar chasquidos
+    fade = np.linspace(0, 1, 1000)
+    audio_flat[:1000] *= fade
+    audio_flat[-1000:] *= fade[::-1]
+    
+    # Normalización Final
     audio_flat -= np.mean(audio_flat)
     if np.max(np.abs(audio_flat)) > 0: audio_flat /= np.max(np.abs(audio_flat))
     
-    return Response(content=(audio_flat * 32767 * 0.9).astype(np.int16).tobytes(), media_type="audio/pcm")
+    return Response(content=(audio_flat * 32767 * 0.8).astype(np.int16).tobytes(), media_type="audio/pcm")
 
 if __name__ == "__main__":
     import uvicorn
