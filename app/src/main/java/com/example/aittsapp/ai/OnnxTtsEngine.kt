@@ -38,6 +38,10 @@ class OnnxTtsEngine : TtsEngine {
 
             val options = OrtSession.SessionOptions().apply {
                 addConfigEntry("session.load_model_format", "ONNX")
+                // OPTIMIZACIONES CRÍTICAS PARA EVITAR CUELGUES (OOM)
+                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+                setIntraOpNumThreads(2) // Límita el estrés del procesador (Evita congelamientos)
+                setInterOpNumThreads(1)
             }
             
             sessionPre = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Preprocess.onnx").absolutePath, options)
@@ -45,7 +49,8 @@ class OnnxTtsEngine : TtsEngine {
             sessionDec = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Decode.onnx").absolutePath, options)
             
             isReady = (sessionPre != null && sessionTrans != null && sessionDec != null)
-            LogManager.log("IA Lista. Mapeo dinámico de entradas activado.")
+            System.gc() // Forzar limpieza tras carga gigante
+            LogManager.log("IA Lista. Memoria blindada (2 Hilos).")
         } catch (e: Exception) { 
             LogManager.log("ERROR INIT: " + e.message)
         }
