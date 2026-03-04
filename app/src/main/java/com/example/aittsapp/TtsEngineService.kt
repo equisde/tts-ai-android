@@ -24,8 +24,16 @@ class TtsEngineService : TextToSpeechService() {
     override fun onCreate() {
         super.onCreate()
         voiceManager = VoiceManager(applicationContext)
-        ttsEngine = OnnxTtsEngine()
-        ttsEngine.initialize(applicationContext)
+        // La inicialización pesada de modelos ONNX (1.4GB) DEBE estar en un hilo secundario
+        Thread {
+            try {
+                ttsEngine = OnnxTtsEngine()
+                ttsEngine.initialize(applicationContext)
+                Log.i(TAG, "Motor ONNX inicializado en hilo secundario.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error crítico al inicializar IA", e)
+            }
+        }.start()
     }
 
     override fun onIsLanguageAvailable(lang: String?, country: String?, variant: String?): Int {
@@ -101,18 +109,24 @@ class TtsEngineService : TextToSpeechService() {
         callback.start(sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
 
         try {
-            // 4. Inferencia por fragmentos (para textos largos)
-            val sentences = processedText.split(Regex("(?<=[.!?])\\s+"))
-            
-            sentences.forEach { sentence ->
-                val pcmData = ttsEngine.synthesize(sentence, selectedProfile)
-                if (pcmData != null) {
-                    callback.audioAvailable(pcmData, 0, pcmData.size)
+            // 4. Inferencia por fragmentos en segundo plano para evitar ANR (App Not Responding)
+            Thread {
+                try {
+                    val sentences = processedText.split(Regex("(?<=[.!?])\\s+"))
+                    sentences.forEach { sentence ->
+                        val pcmData = ttsEngine.synthesize(sentence, selectedProfile)
+                        if (pcmData != null) {
+                            callback.audioAvailable(pcmData, 0, pcmData.size)
+                        }
+                    }
+                    callback.done()
+                } catch (innerE: Exception) {
+                    Log.e(TAG, "Error en hilo de síntesis", innerE)
+                    callback.error()
                 }
-            }
-            callback.done()
+            }.start()
         } catch (e: Exception) {
-            Log.e(TAG, "Error en síntesis del sistema", e)
+            Log.e(TAG, "Error al lanzar hilo de síntesis", e)
             callback.error()
         }
     }
