@@ -17,6 +17,7 @@ import java.nio.ShortBuffer
 
 class OnnxTtsEngine : TtsEngine {
     private val TAG = "OnnxTtsEngine"
+    private var context: Context? = null
     private var ortEnv: OrtEnvironment? = null
     private var sessionPre: OrtSession? = null
     private var sessionTrans: OrtSession? = null
@@ -25,7 +26,8 @@ class OnnxTtsEngine : TtsEngine {
     private var isReady = false
 
     override fun initialize(context: Context) {
-        try {
+        this.context = context
+        LogManager.log("Iniciando Verificación de IA...")
             ortEnv = OrtEnvironment.getEnvironment()
             val vocabFile = getFileFromAssets(context, "models/base/vocab.txt")
             vocabFile.bufferedReader().readLines().forEachIndexed { index, s -> if (s.isNotEmpty()) vocabMap[s] = index.toLong() }
