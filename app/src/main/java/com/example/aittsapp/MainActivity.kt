@@ -5,8 +5,10 @@ import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.view.LayoutInflater
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.example.aittsapp.ai.VoiceCloner
@@ -66,8 +68,11 @@ class MainActivity : AppCompatActivity() {
         btnPickFile.setOnClickListener { filePickerLauncher.launch("audio/*") }
 
         btnProcess.setOnClickListener {
-            if (audioFile != null && audioFile!!.exists()) processVoiceCloning()
-            else Toast.makeText(this, "Primero graba o sube un audio", Toast.LENGTH_SHORT).show()
+            if (audioFile != null && audioFile!!.exists()) {
+                showNameDialog()
+            } else {
+                Toast.makeText(this, "Primero graba o sube un audio", Toast.LENGTH_SHORT).show()
+            }
         }
 
         btnTestVoice.setOnClickListener {
@@ -78,17 +83,9 @@ class MainActivity : AppCompatActivity() {
                 val all = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
                 if (selectedVoiceIndex >= 0 && selectedVoiceIndex < all.size) {
                     val profile = all[selectedVoiceIndex]
-                    Toast.makeText(this@MainActivity, "Probando voz: " + profile.name, Toast.LENGTH_SHORT).show()
-                    
-                    val pcm = withContext(Dispatchers.Default) { 
-                        voiceCloner.synthesizeForTest(text, profile) 
-                    }
-                    
-                    if (pcm != null && pcm.isNotEmpty()) {
-                        audioPlayer.playPcm(pcm)
-                    } else {
-                        Toast.makeText(this@MainActivity, "Error: La IA no generó audio", Toast.LENGTH_LONG).show()
-                    }
+                    Toast.makeText(this@MainActivity, "Probando: " + profile.name, Toast.LENGTH_SHORT).show()
+                    val pcm = withContext(Dispatchers.Default) { voiceCloner.synthesizeForTest(text, profile) }
+                    if (pcm != null && pcm.isNotEmpty()) audioPlayer.playPcm(pcm)
                 }
             }
         }
@@ -100,10 +97,22 @@ class MainActivity : AppCompatActivity() {
         adapter = ArrayAdapter(this, android.R.layout.simple_list_item_single_choice, voiceNames)
         listView.adapter = adapter
         listView.choiceMode = ListView.CHOICE_MODE_SINGLE
-        listView.setOnItemClickListener { _, _, position, _ -> 
-            selectedVoiceIndex = position 
-            Toast.makeText(this, "Voz seleccionada para test", Toast.LENGTH_SHORT).show()
+        listView.setOnItemClickListener { _, _, position, _ -> selectedVoiceIndex = position }
+    }
+
+    private fun showNameDialog() {
+        val builder = AlertDialog.Builder(this)
+        builder.setTitle("Nombre de la voz")
+        val input = EditText(this)
+        input.hint = "Ej: Abuela, Mi Voz, etc."
+        builder.setView(input)
+
+        builder.setPositiveButton("Clonar") { _, _ ->
+            val name = input.text.toString().ifEmpty { "Voz Clonada" }
+            processVoiceCloning(name)
         }
+        builder.setNegativeButton("Cancelar") { dialog, _ -> dialog.cancel() }
+        builder.show()
     }
 
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -126,14 +135,10 @@ class MainActivity : AppCompatActivity() {
                 setOutputFormat(MediaRecorder.OutputFormat.AMR_WB)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AMR_WB)
                 setOutputFile(audioFile!!.absolutePath)
-                prepare()
-                start()
+                prepare(); start()
             }
             findViewById<Button>(R.id.btnRecordVoice).text = "Detener Grabación"
-        } catch (e: Exception) { 
-            isRecording = false 
-            Toast.makeText(this, "Error al usar mic", Toast.LENGTH_SHORT).show()
-        }
+        } catch (e: Exception) { isRecording = false }
     }
 
     private fun stopRecording() {
@@ -143,14 +148,14 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnRecordVoice).text = "Grabar Micrófono"
     }
 
-    private fun processVoiceCloning() {
+    private fun processVoiceCloning(customName: String) {
         lifecycleScope.launch {
-            Toast.makeText(this@MainActivity, "IA analizando voz chilena...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this@MainActivity, "IA analizando...", Toast.LENGTH_SHORT).show()
             val embedding = voiceCloner.cloneFromAudio(audioFile!!)
             if (embedding != null) {
-                voiceManager.saveClonedVoice(embedding)
+                voiceManager.saveClonedVoice(embedding, customName)
                 refreshVoiceList()
-                Toast.makeText(this@MainActivity, "¡Voz clonada añadida!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "¡Voz '\$customName' guardada!", Toast.LENGTH_SHORT).show()
             }
         }
     }

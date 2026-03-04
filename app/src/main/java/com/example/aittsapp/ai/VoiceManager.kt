@@ -24,8 +24,8 @@ class VoiceManager(private val context: Context) {
         return clonedDir.listFiles()?.map { file ->
             VoiceProfile(
                 id = file.nameWithoutExtension,
-                name = "Voz Clonada - \${file.nameWithoutExtension.take(4)}",
-                gender = Gender.FEMALE, // Podría inferirse
+                name = "Voz Personalizada",
+                gender = Gender.FEMALE,
                 isCloned = true,
                 referenceAudio = file,
                 referenceText = ""
@@ -33,13 +33,12 @@ class VoiceManager(private val context: Context) {
         } ?: emptyList()
     }
 
-    fun saveClonedVoice(embedding: FloatArray): VoiceProfile {
+    fun saveClonedVoice(embedding: FloatArray, customName: String): VoiceProfile {
         val id = UUID.randomUUID().toString()
         val file = File(clonedDir, "\$id.bin")
-        // Guardar los bytes del embedding para uso futuro
         file.writeBytes(floatArrayToByteArray(embedding))
         
-        return VoiceProfile(id, "Nueva Voz Clonada", "es-CL", Gender.FEMALE, true, file, "")
+        return VoiceProfile(id, customName, "es-CL", Gender.FEMALE, true, file, "")
     }
 
     private fun floatArrayToByteArray(floats: FloatArray): ByteArray {
