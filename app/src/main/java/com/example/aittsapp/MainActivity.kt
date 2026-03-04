@@ -121,26 +121,31 @@ class MainActivity : AppCompatActivity() {
 
     private fun showCloningDialog() {
         val builder = AlertDialog.Builder(this)
-        builder.setTitle("Clonación Inteligente")
+        builder.setTitle("Clonación 100% Automática")
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 20, 50, 20)
         }
-        val inputName = EditText(this).apply { hint = "Nombre de la voz" }
+        val inputName = EditText(this).apply { hint = "Nombre de la voz (ej: Mi Clon)" }
         container.addView(inputName)
-        val inputRefText = EditText(this).apply { hint = "¿Qué dices en el audio? (Opcional)" }
-        container.addView(inputRefText)
+        
+        val labelGender = TextView(this).apply {
+            text = "Género de la voz:"
+            setPadding(0, 20, 0, 10)
+        }
+        container.addView(labelGender)
+
         val rgGender = RadioGroup(this)
         val rbFemale = RadioButton(this).apply { text = "Mujer"; id = View.generateViewId(); isChecked = true }
         val rbMale = RadioButton(this).apply { text = "Hombre"; id = View.generateViewId() }
         rgGender.addView(rbFemale); rgGender.addView(rbMale)
         container.addView(rgGender)
+
         builder.setView(container)
-        builder.setPositiveButton("Clonar") { _, _ ->
+        builder.setPositiveButton("Clonar con IA") { _, _ ->
             val name = inputName.text.toString().ifEmpty { "Voz Clonada" }
-            val refText = inputRefText.text.toString()
             val gender = if (rbMale.isChecked) Gender.MALE else Gender.FEMALE
-            processVoiceCloning(name, gender, refText)
+            processVoiceCloning(name, gender)
         }
         builder.setNegativeButton("Cancelar", null).show()
     }
@@ -185,19 +190,18 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnRecordVoice).text = "Grabar Micrófono"
     }
 
-    private fun processVoiceCloning(customName: String, gender: Gender, refText: String) {
+    private fun processVoiceCloning(customName: String, gender: Gender) {
         lifecycleScope.launch {
-            LogManager.log("Iniciando clonación remota...")
-            val profile = voiceManager.saveClonedVoice(audioFile!!, customName, gender, refText)
+            LogManager.log("Enviando audio al servidor Whisper...")
+            val profile = voiceManager.saveClonedVoice(audioFile!!, customName, gender, "")
             
-            // LLAMADA REAL AL SERVIDOR
             val success = voiceCloner.cloneRemote(profile)
             
             if (success) {
                 refreshVoiceList()
-                LogManager.log("¡Voz '" + customName + "' clonada con éxito!")
+                LogManager.log("¡Clonación exitosa! La IA ya te conoce.")
             } else {
-                LogManager.log("ERROR: El servidor no pudo procesar la clonación")
+                LogManager.log("ERROR: El servidor no pudo transcribir el audio")
             }
         }
     }
