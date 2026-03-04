@@ -18,7 +18,7 @@ models = {"vocab": {}, "sess_pre": None, "sess_trans": None, "sess_dec": None, "
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("=== Iniciando Servidor F5-Spanish (Chilean Optimized) ===")
+    print("=== Iniciando Servidor TTS Maestro (Anti-Ruido) ===")
     models["whisper"] = whisper.load_model("base")
     vocab_path = os.path.join(MODEL_DIR, "vocab.txt")
     if os.path.exists(vocab_path):
@@ -26,15 +26,13 @@ async def lifespan(app: FastAPI):
             for idx, line in enumerate(f.readlines()):
                 char = line.strip()
                 if char: models["vocab"][char[0]] = idx
-        
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = max(1, int(os.cpu_count() * 0.9))
         try:
-            # Cargamos con nombres de archivo estándar
             models["sess_pre"] = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Preprocess.onnx"), opts)
             models["sess_trans"] = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Transformer.onnx"), opts)
             models["sess_dec"] = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Decode.onnx"), opts)
-            print("Modelos F5-Spanish cargados.")
+            print("IA Lista.")
         except Exception as e: print(f"Error carga: {e}")
     yield
 
@@ -47,19 +45,33 @@ def align_and_cast(session, input_name, data):
             elif 'float' in inp.type: data = data.astype(np.float32)
             elif 'int64' in inp.type: data = data.astype(np.int64)
             elif 'int32' in inp.type: data = data.astype(np.int32)
-            
-            e_shape = inp.shape
-            while len(data.shape) < len(e_shape): data = np.expand_dims(data, axis=0)
-            
-            # Alineación estricta para F5-Spanish
-            if len(e_shape) == len(data.shape):
-                for i in range(len(e_shape)):
-                    if isinstance(e_shape[i], int) and e_shape[i] > 0 and e_shape[i] != data.shape[i]:
-                        for j in range(len(data.shape)):
-                            if data.shape[j] == e_shape[i]:
-                                return np.transpose(data, [j if x==i else (i if x==j else x) for x in range(len(data.shape))])
+            e_s = inp.shape
+            while len(data.shape) < len(e_s): data = np.expand_dims(data, axis=0)
+            a_s = data.shape
+            if len(e_s) == len(a_s):
+                for i in range(len(e_s)):
+                    if isinstance(e_s[i], int) and e_s[i] > 0 and e_s[i] != a_s[i]:
+                        for j in range(len(a_s)):
+                            if a_shape[j] == e_s[i]:
+                                axes = list(range(len(a_s))); axes[i], axes[j] = axes[j], axes[i]
+                                data = np.transpose(data, axes); break
             return data
     return data
+
+@app.post("/clone")
+async def clone(data: str = Form(...), audio: UploadFile = File(...)):
+    print(f"RECIBIDA PETICIÓN CLONACIÓN")
+    req = json.loads(data)
+    voice_id = req.get("voice_id", "voice")
+    p_audio = os.path.join(PROFILES_DIR, f"{voice_id}.wav")
+    p_text = os.path.join(PROFILES_DIR, f"{voice_id}.txt")
+    with open(p_audio, "wb") as f: f.write(await audio.read())
+    print("Transcribiendo...")
+    result = models["whisper"].transcribe(p_audio, language="es")
+    ref_text = result["text"].strip()
+    with open(p_text, "w", encoding="utf-8") as f: f.write(ref_text)
+    print(f"Clonación terminada: {ref_text}")
+    return {"status": "success", "transcription": ref_text}
 
 @app.post("/synthesize")
 async def synthesize(data: str = Form(...)):
@@ -70,20 +82,21 @@ async def synthesize(data: str = Form(...)):
     p_audio = os.path.join(PROFILES_DIR, f"{voice_id}.wav")
     p_text = os.path.join(PROFILES_DIR, f"{voice_id}.txt")
 
+    # CRÍTICO: Si no hay audio de referencia, usar un tono puro de 440Hz para evitar ruido
     if not os.path.exists(p_audio):
-        ref_audio = np.zeros(24000 * 2, dtype=np.float32)
+        print(f"USANDO FALLBACK NEUTRO para {voice_id}")
+        t = np.linspace(0, 2, 24000 * 2)
+        ref_audio = 0.5 * np.sin(2 * np.pi * 440 * t).astype(np.float32)
         ref_text = ""
     else:
         ref_audio, _ = librosa.load(p_audio, sr=24000, mono=True)
         with open(p_text, "r", encoding="utf-8") as f: ref_text = f.read()
 
-    # Pre-procesamiento de texto chileno
     full_text = (ref_text + " " + gen_text).strip()
     tokens = np.array([models["vocab"].get(c, 0) for c in full_text], dtype=np.int64)
-    
-    # IMPORTANTE: Duración calculada según el modelo español
     max_dur = np.array([int(len(ref_audio)/256 + 1 + len(gen_text)*2.5)], dtype=np.int64)
     
+    # ETAPA A
     pre_in = {}
     for inp in models["sess_pre"].get_inputs():
         if 'audio' in inp.name: pre_in[inp.name] = align_and_cast(models["sess_pre"], 'audio', np.expand_dims(ref_audio, axis=(0,1)))
@@ -96,7 +109,7 @@ async def synthesize(data: str = Form(...)):
     noise = pre_outs[[n for n in pre_outs.keys() if 'noise' in n or 'denoised' in n][0]]
     ref_len = pre_outs[[n for n in pre_outs.keys() if 'ref' in n and 'len' in n][0]]
     
-    # Etapa B: Transformer (Solución para evitar ruido blanco)
+    # ETAPA B
     for step in range(30):
         trans_in = {}
         for i, inp in enumerate(models["sess_trans"].get_inputs()):
@@ -105,18 +118,19 @@ async def synthesize(data: str = Form(...)):
             else:
                 match_val = next((v for k, v in pre_outs.items() if k in inp.name or inp.name in k), None)
                 if match_val is not None: trans_in[inp.name] = align_and_cast(models["sess_trans"], inp.name, match_val)
-        
         noise = models["sess_trans"].run(None, trans_in)[0]
         
+    # ETAPA C
     audio_out = models["sess_dec"].run(None, {"denoised": noise, "ref_signal_len": ref_len})[0]
     
-    # Masterización de audio para evitar estática
+    # MASTERIZACIÓN FINAL (SOLUCIÓN DEFINITIVA RUIDO)
     audio_flat = audio_out.flatten().astype(np.float32)
-    audio_flat -= np.mean(audio_flat)
+    # 1. Normalizar al rango -1 a 1
     if np.max(np.abs(audio_flat)) > 0: audio_flat /= np.max(np.abs(audio_flat))
-    
-    pcm = (audio_flat * 32767 * 0.9).astype(np.int16).tobytes()
-    return Response(content=pcm, media_type="audio/pcm")
+    # 2. Eliminar frecuencias bajas inaudibles (DC)
+    audio_flat = audio_flat - np.mean(audio_flat)
+    # 3. Escalar a PCM 16bit Little Endian
+    return Response(content=(audio_flat * 32767).astype(np.int16).tobytes(), media_type="audio/pcm")
 
 if __name__ == "__main__":
     import uvicorn
