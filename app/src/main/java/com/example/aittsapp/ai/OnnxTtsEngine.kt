@@ -27,48 +27,65 @@ class OnnxTtsEngine : TtsEngine {
 
     override fun initialize(context: Context) {
         this.context = context
-        LogManager.log("Iniciando Verificación de IA...")
+        LogManager.log("Inicializando motor IA...")
+        try {
             ortEnv = OrtEnvironment.getEnvironment()
+            
             val vocabFile = getFileFromAssets(context, "models/base/vocab.txt")
-            vocabFile.bufferedReader().readLines().forEachIndexed { index, s -> if (s.isNotEmpty()) vocabMap[s] = index.toLong() }
+            vocabFile.bufferedReader().readLines().forEachIndexed { index, s -> 
+                if (s.isNotEmpty()) vocabMap[s] = index.toLong() 
+            }
 
-            val options = OrtSession.SessionOptions().apply { addConfigEntry("session.load_model_format", "ONNX") }
+            val options = OrtSession.SessionOptions().apply {
+                addConfigEntry("session.load_model_format", "ONNX")
+            }
+            
             sessionPre = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Preprocess.onnx").absolutePath, options)
             sessionTrans = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Transformer.onnx").absolutePath, options)
             sessionDec = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Decode.onnx").absolutePath, options)
             
             isReady = (sessionPre != null && sessionTrans != null && sessionDec != null)
-            LogManager.log("Motor IA iniciado. Rangos de tensores corregidos.")
-        } catch (e: Exception) { LogManager.log("ERROR INIT: " + e.message) }
+            LogManager.log("IA Lista. Soporte INT16/INT64 activado.")
+        } catch (e: Exception) { 
+            LogManager.log("ERROR INIT: " + e.message)
+        }
     }
 
     override fun synthesize(text: String, profile: VoiceProfile): ByteArray? {
-        if (!isReady) return null
         val env = ortEnv ?: return null
-        
-        // Cargar preferencia de calidad
-        val prefs = context.getSharedPreferences("TTS_PREFS", Context.MODE_PRIVATE)
+        val ctx = context ?: return null
+        if (!isReady) return null
+
+        val prefs = ctx.getSharedPreferences("TTS_PREFS", Context.MODE_PRIVATE)
         val steps = if (prefs.getBoolean("HIGH_QUALITY", false)) 32 else 16
         
         try {
-            LogManager.log("Sintetizando (" + steps + " pasos): " + text.take(20) + "...")
+            LogManager.log("Sintetizando (" + steps + " pasos)...")
             
-            val tokens = (profile.referenceText + text).map { it.toString() }.map { vocabMap[it] ?: 0L }.toLongArray()
+            val tokens = (profile.referenceText + text).map { it.toString() }
+                .map { vocabMap[it] ?: 0L }.toLongArray()
+            
             val audioData = loadRawAudio(profile.referenceAudio)
             val maxDuration = (audioData.size / 512 + 1 + text.length * 2).toLong()
 
-            // 1. Etapa A
+            // 1. Preparar Tensores para Etapa A (Preprocess)
             val audioTensor = createAutoTensor(env, "audio", sessionPre!!, audioData)
             val tokenTensor = createAutoTensor(env, "text_ids", sessionPre!!, tokens)
             val durationTensor = createAutoTensor(env, "max_duration", sessionPre!!, maxDuration)
 
+            if (audioTensor == null) {
+                LogManager.log("ERROR: No se pudo crear tensor de audio")
+                return null
+            }
+
             val preInputs = mutableMapOf<String, OnnxTensor>()
-            audioTensor?.let { preInputs["audio"] = it }
+            preInputs["audio"] = audioTensor
             tokenTensor?.let { preInputs["text_ids"] = it }
             durationTensor?.let { preInputs["max_duration"] = it }
 
             val preResults = sessionPre?.run(preInputs) ?: return null
             var noise = preResults.get(0) as OnnxTensor
+            
             val transInputsBase = mutableMapOf<String, OnnxTensor>()
             transInputsBase["rope_cos_q"] = preResults.get(1) as OnnxTensor
             transInputsBase["rope_sin_q"] = preResults.get(2) as OnnxTensor
@@ -78,10 +95,9 @@ class OnnxTtsEngine : TtsEngine {
             transInputsBase["cat_mel_text_drop"] = preResults.get(6) as OnnxTensor
             val refSignalLen = preResults.get(7) as OnnxTensor
 
-            // 2. Bucle de Difusión Dinámico
+            // 2. Bucle de Difusión
             var currentTimeStep = 0L
             for (step in 0 until steps) {
-                if (steps > 16 && step % 8 == 0) LogManager.log("Progreso: " + step + "/" + steps)
                 val timeTensor = createAutoTensor(env, "time_step", sessionTrans!!, currentTimeStep)
                 val transInputs = transInputsBase.toMutableMap()
                 transInputs["noise"] = noise
@@ -89,6 +105,7 @@ class OnnxTtsEngine : TtsEngine {
                 
                 val transResults = sessionTrans?.run(transInputs) ?: break
                 val nextNoise = transResults.get(0) as OnnxTensor
+                
                 if (step > 0) noise.close()
                 timeTensor?.close()
                 noise = nextNoise
@@ -97,7 +114,9 @@ class OnnxTtsEngine : TtsEngine {
 
             // 3. Decodificación
             val decResults = sessionDec?.run(mapOf("denoised" to noise, "ref_signal_len" to refSignalLen)) ?: return null
-            return convertToPcm(decResults.get(0).value)
+            val audioOutput = decResults.get(0).value
+
+            return convertToPcm(audioOutput)
         } catch (e: Exception) {
             LogManager.log("ERROR IA: " + e.message)
             return null
@@ -111,9 +130,14 @@ class OnnxTtsEngine : TtsEngine {
 
         return when (expectedType) {
             OnnxJavaType.FLOAT -> {
-                val floats = if (data is FloatArray) data else bytesToFloats(data as? ByteArray ?: ByteArray(0))
+                val floats = bytesToFloats(data as? ByteArray ?: ByteArray(0))
                 val shape = if (expectedRank == 3) longArrayOf(1, 1, floats.size.toLong()) else longArrayOf(floats.size.toLong())
                 OnnxTensor.createTensor(env, FloatBuffer.wrap(floats), shape)
+            }
+            OnnxJavaType.INT16 -> {
+                val shorts = bytesToShorts(data as? ByteArray ?: ByteArray(0))
+                val shape = if (expectedRank == 3) longArrayOf(1, 1, shorts.size.toLong()) else longArrayOf(shorts.size.toLong())
+                OnnxTensor.createTensor(env, ShortBuffer.wrap(shorts), shape)
             }
             OnnxJavaType.INT64 -> {
                 val longs = when (data) {
@@ -121,7 +145,6 @@ class OnnxTtsEngine : TtsEngine {
                     is Long -> longArrayOf(data)
                     else -> longArrayOf(0L)
                 }
-                // FIX: Si el modelo espera rango 1, enviar [N]. Si espera rango 2, enviar [1, N].
                 val shape = if (expectedRank == 1) longArrayOf(longs.size.toLong()) else longArrayOf(1, longs.size.toLong())
                 OnnxTensor.createTensor(env, LongBuffer.wrap(longs), shape)
             }
@@ -151,9 +174,16 @@ class OnnxTtsEngine : TtsEngine {
         }
     }
 
+    private fun bytesToShorts(bytes: ByteArray): ShortArray {
+        return ShortArray(bytes.size / 2) { i ->
+            ((bytes[i * 2 + 1].toInt() shl 8) or (bytes[i * 2].toInt() and 0xFF)).toShort()
+        }
+    }
+
     private fun convertToPcm(output: Any?): ByteArray? {
         val floats = when (output) {
             is FloatArray -> output
+            is ShortArray -> return shortArrayToByteArray(output)
             is Array<*> -> if (output[0] is FloatArray) output[0] as FloatArray else null
             else -> null
         } ?: return null
@@ -167,10 +197,21 @@ class OnnxTtsEngine : TtsEngine {
         return bytes
     }
 
+    private fun shortArrayToByteArray(shorts: ShortArray): ByteArray {
+        val bytes = ByteArray(shorts.size * 2)
+        for (i in shorts.indices) {
+            bytes[i * 2] = (shorts[i].toInt() and 0xFF).toByte()
+            bytes[i * 2 + 1] = ((shorts[i].toInt() shr 8) and 0xFF).toByte()
+        }
+        return bytes
+    }
+
     private fun getFileFromAssets(context: Context, assetName: String): File {
         val file = File(context.filesDir, assetName.split("/").last())
         if (!file.exists()) {
-            context.assets.open(assetName).use { input -> FileOutputStream(file).use { output -> input.copyTo(output) } }
+            context.assets.open(assetName).use { input -> 
+                FileOutputStream(file).use { output -> input.copyTo(output) } 
+            }
         }
         return file
     }
