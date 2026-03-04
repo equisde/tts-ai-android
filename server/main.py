@@ -12,7 +12,6 @@ from contextlib import asynccontextmanager
 MODEL_DIR = "models/base"
 VOCAB_PATH = os.path.join(MODEL_DIR, "vocab.txt")
 
-# Variables globales para modelos
 models = {
     "vocab": {},
     "sess_pre": None,
@@ -48,8 +47,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="F5-TTS AI Server", lifespan=lifespan)
 
-def get_aligned_tensor(session, input_name, data):
-    """Detecta tipo y forma (shape) esperada por ONNX y alinea los datos."""
+def align_tensor(session, input_name, data):
+    """Detecta tipo y forma (shape) esperada por ONNX y alinea los datos de forma agresiva."""
     for inp in session.get_inputs():
         if input_name in inp.name:
             # 1. Alineación de TIPO
@@ -63,23 +62,23 @@ def get_aligned_tensor(session, input_name, data):
                 data = data.astype(np.int32)
             
             # 2. Alineación de DIMENSIONES (Shape)
-            expected_shape = inp.shape
-            actual_shape = data.shape
+            expected_shape = inp.shape # Ej: [1, 1, 'seq', 64]
+            actual_shape = data.shape   # Ej: [1, 1, 64, 260]
             
             if len(expected_shape) == len(actual_shape):
-                # Si las dimensiones están invertidas (ej: seq vs dim)
+                # Caso común: Dimensiones finales invertidas en RoPE
+                # Buscamos una discrepancia donde el valor fijo esperado está en otra posición
                 for i in range(len(expected_shape)):
-                    if isinstance(expected_shape[i], int) and expected_shape[i] > 0:
-                        if expected_shape[i] != actual_shape[i]:
-                            # Intentamos encontrar dónde está la dimensión correcta
-                            for j in range(i + 1, len(actual_shape)):
-                                if actual_shape[j] == expected_shape[i]:
-                                    print(f"DEBUG: Transponiendo {input_name} ({i}<->{j})")
-                                    # Generar orden de transposición dinámico
+                    expected_dim = expected_shape[i]
+                    if isinstance(expected_dim, int) and expected_dim > 0:
+                        if expected_dim != actual_shape[i]:
+                            # Buscamos si el valor está en otro índice
+                            for j in range(len(actual_shape)):
+                                if actual_shape[j] == expected_dim:
+                                    print(f"ALERTA: Transponiendo {input_name} para coincidir con {expected_shape} (tenía {actual_shape})")
                                     axes = list(range(len(actual_shape)))
                                     axes[i], axes[j] = axes[j], axes[i]
-                                    data = np.transpose(data, axes)
-                                    break
+                                    return np.transpose(data, axes)
             return data
     return data
 
@@ -110,30 +109,38 @@ async def synthesize(data: str = Form(...), audio: UploadFile = File(None)):
     # ETAPA A: PREPROCESS
     pre_inputs = {}
     for inp in models["sess_pre"].get_inputs():
-        if 'audio' in inp.name: pre_inputs[inp.name] = get_aligned_tensor(models["sess_pre"], 'audio', np.expand_dims(ref_audio, axis=(0,1)))
-        elif 'text_ids' in inp.name: pre_inputs[inp.name] = get_aligned_tensor(models["sess_pre"], 'text_ids', np.expand_dims(tokens, axis=0))
-        elif 'max_duration' in inp.name: pre_inputs[inp.name] = get_aligned_tensor(models["sess_pre"], 'max_duration', max_dur)
+        if 'audio' in inp.name: pre_inputs[inp.name] = align_tensor(models["sess_pre"], inp.name, np.expand_dims(ref_audio, axis=(0,1)))
+        elif 'text_ids' in inp.name: pre_inputs[inp.name] = align_tensor(models["sess_pre"], inp.name, np.expand_dims(tokens, axis=0))
+        elif 'max_duration' in inp.name: pre_inputs[inp.name] = align_tensor(models["sess_pre"], inp.name, max_dur)
 
     pre_outs = models["sess_pre"].run(None, pre_inputs)
     noise = pre_outs[0]
     ref_len = pre_outs[7]
     
-    # ETAPA B: TRANSFORMER (Difusión con auto-alineación de soporte)
+    # ETAPA B: TRANSFORMER (Difusión con alineación de soporte)
     try:
+        # Los tensores de soporte son del 1 al 6 en las salidas de Preprocess
+        support_tensors = pre_outs[1:7]
+        
         for step in range(32):
             trans_inputs = {}
-            for i, inp in enumerate(models["sess_trans"].get_inputs()):
-                if 'noise' in inp.name: trans_inputs[inp.name] = noise
-                elif 'time_step' in inp.name: trans_inputs[inp.name] = get_aligned_tensor(models["sess_trans"], 'time_step', np.array([step]))
+            support_idx = 0
+            for inp in models["sess_trans"].get_inputs():
+                if 'noise' in inp.name: 
+                    trans_inputs[inp.name] = noise
+                elif 'time_step' in inp.name: 
+                    trans_inputs[inp.name] = align_tensor(models["sess_trans"], inp.name, np.array([step]))
                 else:
-                    # Tensores de soporte (cos/sin/mel) - i va de 0 a 5
-                    val = pre_outs[i+1]
-                    trans_inputs[inp.name] = get_aligned_tensor(models["sess_trans"], inp.name, val)
+                    # Tensores de soporte (cos/sin/mel)
+                    if support_idx < len(support_tensors):
+                        val = support_tensors[support_idx]
+                        trans_inputs[inp.name] = align_tensor(models["sess_trans"], inp.name, val)
+                        support_idx += 1
             
             noise = models["sess_trans"].run(None, trans_inputs)[0]
     except Exception as e:
         print(f"Error en Transformer: {e}")
-        return Response(content=f"Error: {str(e)}".encode(), status_code=500)
+        return Response(content=f"Error IA: {str(e)}".encode(), status_code=500)
         
     # ETAPA C: DECODE
     dec_inputs = {}
