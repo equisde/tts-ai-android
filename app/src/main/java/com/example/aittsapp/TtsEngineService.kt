@@ -108,17 +108,20 @@ class TtsEngineService : TextToSpeechService() {
         callback.start(sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1)
 
         try {
-            // 4. Inferencia por fragmentos en segundo plano para evitar ANR (App Not Responding)
             Thread {
                 try {
-                    val sentences = processedText.split(Regex("(?<=[.!?])\\s+"))
+                    // Segmentación inteligente por puntuación
+                    val sentences = processedText.split(Regex("(?<=[.!?])\\s+|(?<=[,])\\s+"))
+                    
                     sentences.forEach { sentence ->
-                        // runBlocking es seguro aquí porque estamos en un hilo secundario propio
-                        val pcmData = kotlinx.coroutines.runBlocking { 
-                            ttsEngine.synthesize(sentence, selectedProfile) 
-                        }
-                        if (pcmData != null) {
-                            callback.audioAvailable(pcmData, 0, pcmData.size)
+                        val cleanSentence = sentence.trim()
+                        if (cleanSentence.length > 1) {
+                            val pcmData = kotlinx.coroutines.runBlocking { 
+                                ttsEngine.synthesize(cleanSentence, selectedProfile) 
+                            }
+                            if (pcmData != null) {
+                                callback.audioAvailable(pcmData, 0, pcmData.size)
+                            }
                         }
                     }
                     callback.done()

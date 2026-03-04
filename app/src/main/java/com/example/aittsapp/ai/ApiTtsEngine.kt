@@ -22,16 +22,16 @@ class ApiTtsEngine : TtsEngine {
         serverUrl = prefs.getString("SERVER_URL", "http://YOUR_SERVER_IP:8000") ?: "http://YOUR_SERVER_IP:8000"
         
         client = OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS) // La clonación puede tardar por Whisper
+            .readTimeout(300, TimeUnit.SECONDS) // AUMENTADO A 5 MINUTOS
             .build()
             
-        LogManager.log("Cliente iniciado: " + serverUrl)
+        LogManager.log("Cliente listo (Timeout 5min): " + serverUrl)
     }
 
     override suspend fun clone(profile: VoiceProfile): Boolean = withContext(Dispatchers.IO) {
-        LogManager.log("Enviando audio al servidor para clonación...")
+        LogManager.log("Clonando identidad vocal...")
         val audioFile = profile.referenceAudio ?: return@withContext false
         
         val json = JSONObject().apply {
@@ -49,13 +49,9 @@ class ApiTtsEngine : TtsEngine {
 
         try {
             val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                LogManager.log("¡Clonación exitosa en servidor!")
-                return@withContext true
-            }
-            LogManager.log("Fallo clonación: " + response.code)
+            return@withContext response.isSuccessful
         } catch (e: Exception) {
-            LogManager.log("Error de conexión al clonar: " + e.message)
+            LogManager.log("Error Red (Clonar): " + e.message)
         }
         return@withContext false
     }
@@ -75,8 +71,9 @@ class ApiTtsEngine : TtsEngine {
 
             val response = client.newCall(request).execute()
             if (response.isSuccessful) return@withContext response.body?.bytes()
+            else LogManager.log("Server Error: " + response.code)
         } catch (e: Exception) {
-            LogManager.log("Error en síntesis: " + e.message)
+            LogManager.log("Error Red (Synthesize): " + e.message)
         }
         return@withContext null
     }
