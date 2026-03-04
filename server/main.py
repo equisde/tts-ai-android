@@ -42,23 +42,31 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="F5-TTS Voice Identity Server", lifespan=lifespan)
 
-def align_tensor(session, input_name, data):
+def get_aligned_tensor(session, input_name, data):
+    """Convierte tipos y alinea dimensiones para ONNX."""
     for inp in session.get_inputs():
         if input_name in inp.name:
+            # Alineación de TIPO
             if 'int16' in inp.type:
                 data = (data * 32767).astype(np.int16) if data.dtype == np.float32 else data.astype(np.int16)
             elif 'float' in inp.type: data = data.astype(np.float32)
             elif 'int64' in inp.type: data = data.astype(np.int64)
             elif 'int32' in inp.type: data = data.astype(np.int32)
             
+            # Alineación de DIMENSIONES (Shape)
             e_shape = inp.shape
             a_shape = data.shape
             if len(e_shape) == len(a_shape):
                 for i in range(len(e_shape)):
-                    if isinstance(e_shape[i], int) and e_shape[i] > 0 and e_shape[i] != a_shape[i]:
+                    expected_dim = e_shape[i]
+                    if isinstance(expected_dim, int) and expected_dim > 0 and expected_dim != a_shape[i]:
                         for j in range(len(a_shape)):
-                            if a_shape[j] == e_shape[i]:
-                                return np.transpose(data, list(range(len(a_shape))).apply { this[i]=j; this[j]=i }) # Simplificado
+                            if a_shape[j] == expected_dim:
+                                # FIX: Sintaxis Python correcta para transposición
+                                axes = list(range(len(a_shape)))
+                                axes[i], axes[j] = axes[j], axes[i]
+                                print(f"Alineando {input_name}: Transposición {axes}")
+                                return np.transpose(data, axes)
             return data
     return data
 
@@ -69,45 +77,47 @@ async def synthesize(data: str = Form(...), audio: UploadFile = File(None)):
     voice_id = req.get("voice_id", "default")
     ref_text = req.get("reference_text", "")
     
-    # LÓGICA DE IDENTIDAD VOCAL
     profile_path = os.path.join(PROFILES_DIR, f"{voice_id}.wav")
     ref_text_path = os.path.join(PROFILES_DIR, f"{voice_id}.txt")
 
-    # 1. Si recibimos audio nuevo (Clonación en caliente), lo guardamos
     if audio:
         audio_bytes = await audio.read()
         with open(profile_path, "wb") as f: f.write(audio_bytes)
         if ref_text:
             with open(ref_text_path, "w", encoding="utf-8") as f: f.write(ref_text)
     
-    # 2. Cargar audio de referencia del perfil solicitado
     if os.path.exists(profile_path):
         ref_audio, _ = librosa.load(profile_path, sr=24000, mono=True)
         if not ref_text and os.path.exists(ref_text_path):
             with open(ref_text_path, "r", encoding="utf-8") as f: ref_text = f.read()
     else:
-        # Fallback a silencio o voz base si no existe el perfil
         ref_audio = np.zeros(24000, dtype=np.float32)
         ref_text = ""
 
     tokens = np.array([models["vocab"].get(c, 0) for c in (ref_text + gen_text)], dtype=np.int64)
     max_dur = np.array([int(len(ref_audio)/256 + 1 + len(gen_text)*2)], dtype=np.int64)
     
-    # Pipeline IA (A -> B -> C)
+    # ETAPA A: PREPROCESS
     pre_inputs = {}
     for inp in models["sess_pre"].get_inputs():
-        if 'audio' in inp.name: pre_inputs[inp.name] = align_tensor(models["sess_pre"], 'audio', np.expand_dims(ref_audio, axis=(0,1)))
-        if 'text_ids' in inp.name: pre_inputs[inp.name] = align_tensor(models["sess_pre"], 'text_ids', np.expand_dims(tokens, axis=0))
-        if 'max_duration' in inp.name: pre_inputs[inp.name] = align_tensor(models["sess_pre"], 'max_duration', max_dur)
+        if 'audio' in inp.name: pre_inputs[inp.name] = get_aligned_tensor(models["sess_pre"], 'audio', np.expand_dims(ref_audio, axis=(0,1)))
+        elif 'text_ids' in inp.name: pre_inputs[inp.name] = get_aligned_tensor(models["sess_pre"], 'text_ids', np.expand_dims(tokens, axis=0))
+        elif 'max_duration' in inp.name: pre_inputs[inp.name] = get_aligned_tensor(models["sess_pre"], 'max_duration', max_dur)
 
     pre_outs = models["sess_pre"].run(None, pre_inputs)
     noise = pre_outs[0]
     
+    # ETAPA B: TRANSFORMER (Difusión 30 pasos)
     for step in range(30):
         trans_inputs = {inp.name: pre_outs[i+1] for i, inp in enumerate(models["sess_trans"].get_inputs()) if i < 6}
         trans_inputs[models["sess_trans"].get_inputs()[6].name] = noise
-        trans_inputs[models["sess_trans"].get_inputs()[7].name] = align_tensor(models["sess_trans"], 'time_step', np.array([step]))
+        trans_inputs[models["sess_trans"].get_inputs()[7].name] = get_aligned_tensor(models["sess_trans"], 'time_step', np.array([step]))
         noise = models["sess_trans"].run(None, trans_inputs)[0]
         
+    # ETAPA C: DECODE
     audio_out = models["sess_dec"].run(None, {"denoised": noise, "ref_signal_len": pre_outs[7]})[0]
     return Response(content=(audio_out.flatten() * 32767).astype(np.int16).tobytes(), media_type="audio/pcm")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
