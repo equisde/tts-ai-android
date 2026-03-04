@@ -26,6 +26,14 @@ class TtsSettingsActivity : AppCompatActivity() {
         
         val sharedPrefs = getSharedPreferences("TTS_PREFS", Context.MODE_PRIVATE)
         val selectedVoiceId = sharedPrefs.getString("DEFAULT_VOICE_ID", "cl-female-base")
+        
+        val swHighQuality = findViewById<com.google.android.material.switchmaterial.SwitchMaterial>(R.id.swHighQuality)
+        swHighQuality.isChecked = sharedPrefs.getBoolean("HIGH_QUALITY", false)
+        swHighQuality.setOnCheckedChangeListener { _, isChecked ->
+            sharedPrefs.edit().putBoolean("HIGH_QUALITY", isChecked).apply()
+            val msg = if (isChecked) "Modo Alta Calidad (32 pasos)" else "Modo Turbo (16 pasos)"
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        }
 
         val allVoices = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
         

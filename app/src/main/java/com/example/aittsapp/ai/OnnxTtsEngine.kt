@@ -43,12 +43,19 @@ class OnnxTtsEngine : TtsEngine {
     override fun synthesize(text: String, profile: VoiceProfile): ByteArray? {
         if (!isReady) return null
         val env = ortEnv ?: return null
+        
+        // Cargar preferencia de calidad
+        val prefs = context.getSharedPreferences("TTS_PREFS", Context.MODE_PRIVATE)
+        val steps = if (prefs.getBoolean("HIGH_QUALITY", false)) 32 else 16
+        
         try {
+            LogManager.log("Sintetizando (" + steps + " pasos): " + text.take(20) + "...")
+            
             val tokens = (profile.referenceText + text).map { it.toString() }.map { vocabMap[it] ?: 0L }.toLongArray()
             val audioData = loadRawAudio(profile.referenceAudio)
             val maxDuration = (audioData.size / 512 + 1 + text.length * 2).toLong()
 
-            // 1. Preparar Tensores con RANGO CORRECTO (Got 2 Expected 1 Fix)
+            // 1. Etapa A
             val audioTensor = createAutoTensor(env, "audio", sessionPre!!, audioData)
             val tokenTensor = createAutoTensor(env, "text_ids", sessionPre!!, tokens)
             val durationTensor = createAutoTensor(env, "max_duration", sessionPre!!, maxDuration)
@@ -60,8 +67,6 @@ class OnnxTtsEngine : TtsEngine {
 
             val preResults = sessionPre?.run(preInputs) ?: return null
             var noise = preResults.get(0) as OnnxTensor
-            
-            // Capturar otros 7 tensores necesarios para el transformer
             val transInputsBase = mutableMapOf<String, OnnxTensor>()
             transInputsBase["rope_cos_q"] = preResults.get(1) as OnnxTensor
             transInputsBase["rope_sin_q"] = preResults.get(2) as OnnxTensor
@@ -71,9 +76,10 @@ class OnnxTtsEngine : TtsEngine {
             transInputsBase["cat_mel_text_drop"] = preResults.get(6) as OnnxTensor
             val refSignalLen = preResults.get(7) as OnnxTensor
 
-            // 2. Bucle de Difusión (16 pasos)
+            // 2. Bucle de Difusión Dinámico
             var currentTimeStep = 0L
-            for (step in 0 until 16) {
+            for (step in 0 until steps) {
+                if (steps > 16 && step % 8 == 0) LogManager.log("Progreso: " + step + "/" + steps)
                 val timeTensor = createAutoTensor(env, "time_step", sessionTrans!!, currentTimeStep)
                 val transInputs = transInputsBase.toMutableMap()
                 transInputs["noise"] = noise

@@ -1,32 +1,42 @@
 package com.example.aittsapp.engine
 
 /**
- * Pre-procesador especializado en el español de Chile.
- * Normaliza abreviaturas, modismos y ajusta la puntuación para la prosodia chilena.
+ * Pre-procesador avanzado para el español de Chile.
+ * Ajusta el texto para que la IA emule la fonética regional.
  */
 object ChileanPreProcessor {
     
     fun process(text: String): String {
-        var processed = text.lowercase()
+        var p = text.lowercase()
         
-        // Normalización de puntuación para pausas naturales de la IA
-        processed = processed.replace("...", "...")
-        processed = processed.replace("?", "? ")
-        processed = processed.replace("!", "! ")
+        // 1. Manejo de pausas y énfasis (Prosodia)
+        p = p.replace("?", "? ")
+        p = p.replace("!", "! ")
+        p = p.replace(",", ", ")
         
-        // Manejo de modismos básicos para mejorar la fonética de la IA
-        // (Ajustamos el texto para que el modelo F5-Spanish lo entienda mejor)
-        val replacements = mapOf(
-            "cachai" to "cachaai",
-            "po" to "poh",
+        // 2. Fonética Chilena (Ajustes para el Transformer)
+        // La IA lee mejor si el texto refleja la intención sonora
+        val phoneticRules = mapOf(
             "chile" to "chiile",
-            "bacán" to "bacaan"
+            "estás" to "estái",
+            "estamos" to "estamo",
+            "bueno" to "güeno",
+            "verdad" to "verdáh",
+            "entonces" to "entonce",
+            "asado" to "asao",
+            "pescado" to "pescao",
+            "complicado" to "complicao"
         )
         
-        replacements.forEach { (old, new) ->
-            processed = processed.replace(old, new)
+        phoneticRules.forEach { (old, new) ->
+            p = p.replace(Regex("\\b$old\\b"), new)
         }
         
-        return processed.trim()
+        // 3. Modismos comunes
+        p = p.replace("cachai", "cachaai")
+        p = p.replace("fome", "foome")
+        p = p.replace("bacán", "bacaan")
+        
+        return p.trim()
     }
 }
