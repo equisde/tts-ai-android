@@ -45,7 +45,7 @@ class OnnxTtsEngine : TtsEngine {
             sessionDec = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Decode.onnx").absolutePath, options)
             
             isReady = (sessionPre != null && sessionTrans != null && sessionDec != null)
-            LogManager.log("IA Lista. Soporte INT16/INT64 activado.")
+            LogManager.log("IA Lista. Mapeo dinámico de entradas activado.")
         } catch (e: Exception) { 
             LogManager.log("ERROR INIT: " + e.message)
         }
@@ -60,7 +60,7 @@ class OnnxTtsEngine : TtsEngine {
         val steps = if (prefs.getBoolean("HIGH_QUALITY", false)) 32 else 16
         
         try {
-            LogManager.log("Sintetizando (" + steps + " pasos)...")
+            LogManager.log("Sintetizando...")
             
             val tokens = (profile.referenceText + text).map { it.toString() }
                 .map { vocabMap[it] ?: 0L }.toLongArray()
@@ -68,40 +68,35 @@ class OnnxTtsEngine : TtsEngine {
             val audioData = loadRawAudio(profile.referenceAudio)
             val maxDuration = (audioData.size / 512 + 1 + text.length * 2).toLong()
 
-            // 1. Preparar Tensores para Etapa A (Preprocess)
-            val audioTensor = createAutoTensor(env, "audio", sessionPre!!, audioData)
-            val tokenTensor = createAutoTensor(env, "text_ids", sessionPre!!, tokens)
-            val durationTensor = createAutoTensor(env, "max_duration", sessionPre!!, maxDuration)
-
-            if (audioTensor == null) {
-                LogManager.log("ERROR: No se pudo crear tensor de audio")
-                return null
-            }
-
+            // ETAPA A: Pre-procesamiento
             val preInputs = mutableMapOf<String, OnnxTensor>()
-            preInputs["audio"] = audioTensor
-            tokenTensor?.let { preInputs["text_ids"] = it }
-            durationTensor?.let { preInputs["max_duration"] = it }
+            findAndAddTensor(env, sessionPre!!, preInputs, "audio", audioData)
+            findAndAddTensor(env, sessionPre!!, preInputs, "text_ids", tokens)
+            findAndAddTensor(env, sessionPre!!, preInputs, "max_duration", maxDuration)
 
             val preResults = sessionPre?.run(preInputs) ?: return null
             var noise = preResults.get(0) as OnnxTensor
             
+            // Capturar tensores de soporte para el Transformer
             val transInputsBase = mutableMapOf<String, OnnxTensor>()
-            transInputsBase["rope_cos_q"] = preResults.get(1) as OnnxTensor
-            transInputsBase["rope_sin_q"] = preResults.get(2) as OnnxTensor
-            transInputsBase["rope_cos_k"] = preResults.get(3) as OnnxTensor
-            transInputsBase["rope_sin_k"] = preResults.get(4) as OnnxTensor
-            transInputsBase["cat_mel_text"] = preResults.get(5) as OnnxTensor
-            transInputsBase["cat_mel_text_drop"] = preResults.get(6) as OnnxTensor
+            val supportKeys = listOf("rope_cos_q", "rope_sin_q", "rope_cos_k", "rope_sin_k", "cat_mel_text", "cat_mel_text_drop")
+            supportKeys.forEachIndexed { i, key ->
+                transInputsBase[key] = preResults.get(i + 1) as OnnxTensor
+            }
             val refSignalLen = preResults.get(7) as OnnxTensor
 
-            // 2. Bucle de Difusión
+            // ETAPA B: Bucle de Difusión Dinámico
             var currentTimeStep = 0L
+            val transInputNames = sessionTrans!!.inputNames.toList()
+            val noiseKey = transInputNames.find { it.contains("noise") } ?: "noise"
+            val timeKey = transInputNames.find { it.contains("time_step") } ?: "time_step"
+
             for (step in 0 until steps) {
-                val timeTensor = createAutoTensor(env, "time_step", sessionTrans!!, currentTimeStep)
                 val transInputs = transInputsBase.toMutableMap()
-                transInputs["noise"] = noise
-                timeTensor?.let { transInputs["time_step"] = it }
+                transInputs[noiseKey] = noise
+                
+                val timeTensor = createAutoTensor(env, timeKey, sessionTrans!!, currentTimeStep)
+                timeTensor?.let { transInputs[timeKey] = it }
                 
                 val transResults = sessionTrans?.run(transInputs) ?: break
                 val nextNoise = transResults.get(0) as OnnxTensor
@@ -112,15 +107,23 @@ class OnnxTtsEngine : TtsEngine {
                 currentTimeStep++
             }
 
-            // 3. Decodificación
-            val decResults = sessionDec?.run(mapOf("denoised" to noise, "ref_signal_len" to refSignalLen)) ?: return null
-            val audioOutput = decResults.get(0).value
-
-            return convertToPcm(audioOutput)
+            // ETAPA C: Decodificación
+            val decInputs = mutableMapOf<String, OnnxTensor>()
+            decInputs["denoised"] = noise
+            decInputs["ref_signal_len"] = refSignalLen
+            
+            val decResults = sessionDec?.run(decInputs) ?: return null
+            return convertToPcm(decResults.get(0).value)
         } catch (e: Exception) {
             LogManager.log("ERROR IA: " + e.message)
             return null
         }
+    }
+
+    private fun findAndAddTensor(env: OrtEnvironment, session: OrtSession, map: MutableMap<String, OnnxTensor>, partialName: String, data: Any) {
+        val actualName = session.inputNames.find { it.contains(partialName) } ?: partialName
+        val tensor = createAutoTensor(env, actualName, session, data)
+        tensor?.let { map[actualName] = it }
     }
 
     private fun createAutoTensor(env: OrtEnvironment, inputName: String, session: OrtSession, data: Any): OnnxTensor? {
@@ -140,22 +143,12 @@ class OnnxTtsEngine : TtsEngine {
                 OnnxTensor.createTensor(env, ShortBuffer.wrap(shorts), shape)
             }
             OnnxJavaType.INT64 -> {
-                val longs = when (data) {
-                    is LongArray -> data
-                    is Long -> longArrayOf(data)
-                    else -> longArrayOf(0L)
-                }
+                val longs = if (data is LongArray) data else longArrayOf((data as? Long) ?: (data as? Int)?.toLong() ?: 0L)
                 val shape = if (expectedRank == 1) longArrayOf(longs.size.toLong()) else longArrayOf(1, longs.size.toLong())
                 OnnxTensor.createTensor(env, LongBuffer.wrap(longs), shape)
             }
             OnnxJavaType.INT32 -> {
-                val ints = when (data) {
-                    is IntArray -> data
-                    is Int -> intArrayOf(data)
-                    is Long -> intArrayOf(data.toInt())
-                    is LongArray -> data.map { it.toInt() }.toIntArray()
-                    else -> intArrayOf(0)
-                }
+                val ints = if (data is IntArray) data else intArrayOf((data as? Int) ?: (data as? Long)?.toInt() ?: 0)
                 val shape = if (expectedRank == 1) longArrayOf(ints.size.toLong()) else longArrayOf(1, ints.size.toLong())
                 OnnxTensor.createTensor(env, IntBuffer.wrap(ints), shape)
             }
