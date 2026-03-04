@@ -15,11 +15,11 @@ import java.util.concurrent.TimeUnit
 class ApiTtsEngine : TtsEngine {
     private val TAG = "ApiTtsEngine"
     private lateinit var client: OkHttpClient
-    private var serverUrl: String = "http://52.1.236.194:8000"
+    private var serverUrl: String = "http://YOUR_SERVER_IP:8000"
 
     override fun initialize(context: Context) {
         val prefs = context.getSharedPreferences("TTS_PREFS", Context.MODE_PRIVATE)
-        serverUrl = prefs.getString("SERVER_URL", "http://52.1.236.194:8000") ?: "http://52.1.236.194:8000"
+        serverUrl = prefs.getString("SERVER_URL", "http://YOUR_SERVER_IP:8000") ?: "http://YOUR_SERVER_IP:8000"
         
         client = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)

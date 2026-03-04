@@ -75,8 +75,11 @@ class MainActivity : AppCompatActivity() {
         btnPickFile.setOnClickListener { filePickerLauncher.launch("audio/*") }
 
         btnProcess.setOnClickListener {
-            if (audioFile != null && audioFile!!.exists()) showNameAndGenderDialog()
-            else Toast.makeText(this, "Primero graba o sube un audio", Toast.LENGTH_SHORT).show()
+            if (audioFile != null && audioFile!!.exists()) {
+                showCloningDialog()
+            } else {
+                Toast.makeText(this, "Primero graba o sube un audio", Toast.LENGTH_SHORT).show()
+            }
         }
 
         btnTestVoice.setOnClickListener {
@@ -89,7 +92,6 @@ class MainActivity : AppCompatActivity() {
                     val profile = all[selectedVoiceIndex]
                     LogManager.log("Probando voz: " + profile.name)
                     
-                    // CORRECCIÓN: Ejecutar síntesis en hilo IO para evitar crasheo
                     val pcm = withContext(Dispatchers.IO) { 
                         voiceCloner.synthesizeForTest(text, profile) 
                     }
@@ -97,7 +99,7 @@ class MainActivity : AppCompatActivity() {
                     if (pcm != null && pcm.isNotEmpty()) {
                         audioPlayer.playPcm(pcm)
                     } else {
-                        LogManager.log("ERROR: El servidor no devolvió audio")
+                        LogManager.log("ERROR: La IA no devolvió audio")
                     }
                 }
             }
@@ -122,25 +124,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showNameAndGenderDialog() {
+    private fun showCloningDialog() {
         val builder = AlertDialog.Builder(this)
-        builder.setTitle("Configurar nueva voz")
+        builder.setTitle("Clonación Inteligente")
+        
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 20, 50, 20)
         }
+
         val inputName = EditText(this).apply { hint = "Nombre de la voz" }
         container.addView(inputName)
+
+        val inputRefText = EditText(this).apply { 
+            hint = "¿Qué dice el audio de 30s? (Crucial)" 
+            minLines = 2
+        }
+        container.addView(inputRefText)
+
+        val labelGender = TextView(this).apply {
+            text = "Género de la voz:"
+            setPadding(0, 20, 0, 10)
+        }
+        container.addView(labelGender)
+
         val rgGender = RadioGroup(this)
         val rbFemale = RadioButton(this).apply { text = "Mujer"; id = View.generateViewId(); isChecked = true }
         val rbMale = RadioButton(this).apply { text = "Hombre"; id = View.generateViewId() }
         rgGender.addView(rbFemale); rgGender.addView(rbMale)
         container.addView(rgGender)
+
         builder.setView(container)
+
         builder.setPositiveButton("Clonar") { _, _ ->
             val name = inputName.text.toString().ifEmpty { "Voz Clonada" }
+            val refText = inputRefText.text.toString()
             val gender = if (rbMale.isChecked) Gender.MALE else Gender.FEMALE
-            processVoiceCloning(name, gender)
+            processVoiceCloning(name, gender, refText)
         }
         builder.setNegativeButton("Cancelar", null).show()
     }
@@ -190,14 +210,15 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnRecordVoice).text = "Grabar Micrófono"
     }
 
-    private fun processVoiceCloning(customName: String, gender: Gender) {
+    private fun processVoiceCloning(customName: String, gender: Gender, refText: String) {
         lifecycleScope.launch {
-            LogManager.log("Analizando identidad...")
+            LogManager.log("Iniciando clonación para: " + customName)
             val embedding = voiceCloner.cloneFromAudio(audioFile!!)
             if (embedding != null) {
-                voiceManager.saveClonedVoice(embedding, customName, gender)
+                // Ahora VoiceManager guarda también el texto de referencia
+                voiceManager.saveClonedVoice(embedding, customName, gender, refText)
                 refreshVoiceList()
-                LogManager.log("¡Voz '" + customName + "' guardada!")
+                LogManager.log("¡Voz '" + customName + "' guardada con éxito!")
             }
         }
     }

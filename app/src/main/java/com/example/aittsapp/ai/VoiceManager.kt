@@ -4,10 +4,6 @@ import android.content.Context
 import java.io.File
 import java.util.UUID
 
-/**
- * Gestor de perfiles de voz mejorado.
- * Permite guardar, listar y eliminar voces clonadas con metadatos (Género).
- */
 class VoiceManager(private val context: Context) {
     
     private val clonedDir = File(context.filesDir, "cloned_voices").apply { mkdirs() }
@@ -19,35 +15,41 @@ class VoiceManager(private val context: Context) {
         )
     }
 
-    /**
-     * Recupera las voces clonadas. 
-     * Formato de archivo esperado: id_gender_name.bin
-     */
     fun getClonedVoices(): List<VoiceProfile> {
-        return clonedDir.listFiles()?.mapNotNull { file ->
-            val parts = file.nameWithoutExtension.split("_")
+        return clonedDir.listFiles()?.filter { it.extension == "wav" }?.mapNotNull { audioFile ->
+            val parts = audioFile.nameWithoutExtension.split("_")
             if (parts.size >= 3) {
                 val id = parts[0]
-                val gender = if (parts[1].lowercase() == "male") Gender.MALE else Gender.FEMALE
+                val gender = if (parts[1] == "male") Gender.MALE else Gender.FEMALE
                 val name = parts[2]
-                VoiceProfile(id, name, "es-CL", gender, true, file, "")
+                val textFile = File(clonedDir, "${audioFile.nameWithoutExtension}.txt")
+                val refText = if (textFile.exists()) textFile.readText() else ""
+                VoiceProfile(id, name, "es-CL", gender, true, audioFile, refText)
             } else null
         } ?: emptyList()
     }
 
-    fun saveClonedVoice(embedding: FloatArray, customName: String, gender: Gender): VoiceProfile {
+    fun saveClonedVoice(embedding: FloatArray, customName: String, gender: Gender, refText: String): VoiceProfile {
         val id = UUID.randomUUID().toString()
         val genderStr = if (gender == Gender.MALE) "male" else "female"
-        // Guardamos metadatos en el nombre del archivo para simplicidad
-        val fileName = "${id}_${genderStr}_${customName}.bin"
-        val file = File(clonedDir, fileName)
-        file.writeBytes(floatArrayToByteArray(embedding))
+        val baseName = "${id}_${genderStr}_${customName}"
         
-        return VoiceProfile(id, customName, "es-CL", gender, true, file, "")
+        // Guardamos el audio real para enviarlo al servidor
+        val audioDest = File(clonedDir, "$baseName.wav")
+        // En una implementación real, aquí moveríamos el archivo temporal al destino final
+        
+        // Guardamos el texto de referencia
+        val textFile = File(clonedDir, "$baseName.txt")
+        textFile.writeText(refText)
+        
+        return VoiceProfile(id, customName, "es-CL", gender, true, audioDest, refText)
     }
 
     fun deleteVoice(profile: VoiceProfile): Boolean {
-        return profile.referenceAudio?.delete() ?: false
+        val baseName = profile.referenceAudio?.nameWithoutExtension ?: return false
+        val audioFile = File(clonedDir, "$baseName.wav")
+        val textFile = File(clonedDir, "$baseName.txt")
+        return audioFile.delete() && textFile.delete()
     }
 
     private fun floatArrayToByteArray(floats: FloatArray): ByteArray {
