@@ -8,7 +8,6 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import Response
 from contextlib import asynccontextmanager
 
-# Directorios de producción
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models", "base")
 PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
@@ -43,29 +42,30 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="F5-TTS Voice Identity Server", lifespan=lifespan)
 
 def get_aligned_tensor(session, input_name, data):
-    """Convierte tipos y alinea dimensiones para ONNX."""
+    """Alineación forzada de tipos y dimensiones para F5-TTS."""
     for inp in session.get_inputs():
         if input_name in inp.name:
-            # Alineación de TIPO
+            # 1. Casting de Tipo
             if 'int16' in inp.type:
                 data = (data * 32767).astype(np.int16) if data.dtype == np.float32 else data.astype(np.int16)
             elif 'float' in inp.type: data = data.astype(np.float32)
             elif 'int64' in inp.type: data = data.astype(np.int64)
             elif 'int32' in inp.type: data = data.astype(np.int32)
             
-            # Alineación de DIMENSIONES (Shape)
+            # 2. Alineación de Dimensiones (FIX para RoPE [..., 64])
             e_shape = inp.shape
             a_shape = data.shape
             if len(e_shape) == len(a_shape):
+                # Si el modelo espera una dimensión fija (como 64) en una posición y está en otra
                 for i in range(len(e_shape)):
-                    expected_dim = e_shape[i]
-                    if isinstance(expected_dim, int) and expected_dim > 0 and expected_dim != a_shape[i]:
+                    target_dim = e_shape[i]
+                    if isinstance(target_dim, int) and target_dim > 0 and target_dim != a_shape[i]:
+                        # Buscar dónde está esa dimensión en el tensor actual
                         for j in range(len(a_shape)):
-                            if a_shape[j] == expected_dim:
-                                # FIX: Sintaxis Python correcta para transposición
+                            if a_shape[j] == target_dim:
                                 axes = list(range(len(a_shape)))
                                 axes[i], axes[j] = axes[j], axes[i]
-                                print(f"Alineando {input_name}: Transposición {axes}")
+                                print(f"ALINEANDO {input_name}: Swap dims {j} -> {i} (Shape final: {np.transpose(data, axes).shape})")
                                 return np.transpose(data, axes)
             return data
     return data
@@ -77,19 +77,20 @@ async def synthesize(data: str = Form(...), audio: UploadFile = File(None)):
     voice_id = req.get("voice_id", "default")
     ref_text = req.get("reference_text", "")
     
-    profile_path = os.path.join(PROFILES_DIR, f"{voice_id}.wav")
-    ref_text_path = os.path.join(PROFILES_DIR, f"{voice_id}.txt")
+    # Manejo de archivos de perfil
+    p_audio = os.path.join(PROFILES_DIR, f"{voice_id}.wav")
+    p_text = os.path.join(PROFILES_DIR, f"{voice_id}.txt")
 
     if audio:
         audio_bytes = await audio.read()
-        with open(profile_path, "wb") as f: f.write(audio_bytes)
+        with open(p_audio, "wb") as f: f.write(audio_bytes)
         if ref_text:
-            with open(ref_text_path, "w", encoding="utf-8") as f: f.write(ref_text)
+            with open(p_text, "w", encoding="utf-8") as f: f.write(ref_text)
     
-    if os.path.exists(profile_path):
-        ref_audio, _ = librosa.load(profile_path, sr=24000, mono=True)
-        if not ref_text and os.path.exists(ref_text_path):
-            with open(ref_text_path, "r", encoding="utf-8") as f: ref_text = f.read()
+    if os.path.exists(p_audio):
+        ref_audio, _ = librosa.load(p_audio, sr=24000, mono=True)
+        if not ref_text and os.path.exists(p_text):
+            with open(p_text, "r", encoding="utf-8") as f: ref_text = f.read()
     else:
         ref_audio = np.zeros(24000, dtype=np.float32)
         ref_text = ""
@@ -107,16 +108,22 @@ async def synthesize(data: str = Form(...), audio: UploadFile = File(None)):
     pre_outs = models["sess_pre"].run(None, pre_inputs)
     noise = pre_outs[0]
     
-    # ETAPA B: TRANSFORMER (Difusión 30 pasos)
+    # ETAPA B: TRANSFORMER (Bucle de 30 pasos con alineación agresiva)
     for step in range(30):
-        trans_inputs = {inp.name: pre_outs[i+1] for i, inp in enumerate(models["sess_trans"].get_inputs()) if i < 6}
-        trans_inputs[models["sess_trans"].get_inputs()[6].name] = noise
-        trans_inputs[models["sess_trans"].get_inputs()[7].name] = get_aligned_tensor(models["sess_trans"], 'time_step', np.array([step]))
+        trans_inputs = {}
+        for i, inp in enumerate(models["sess_trans"].get_inputs()):
+            if 'noise' in inp.name: trans_inputs[inp.name] = noise
+            elif 'time_step' in inp.name: trans_inputs[inp.name] = get_aligned_tensor(models["sess_trans"], 'time_step', np.array([step]))
+            else:
+                # Soporte (Rope/Mel) - Las salidas de pre_outs son [1:7]
+                trans_inputs[inp.name] = get_aligned_tensor(models["sess_trans"], inp.name, pre_outs[i+1])
+        
         noise = models["sess_trans"].run(None, trans_inputs)[0]
         
     # ETAPA C: DECODE
     audio_out = models["sess_dec"].run(None, {"denoised": noise, "ref_signal_len": pre_outs[7]})[0]
-    return Response(content=(audio_out.flatten() * 32767).astype(np.int16).tobytes(), media_type="audio/pcm")
+    pcm = (audio_out.flatten() * 32767).astype(np.int16).tobytes()
+    return Response(content=pcm, media_type="audio/pcm")
 
 if __name__ == "__main__":
     import uvicorn

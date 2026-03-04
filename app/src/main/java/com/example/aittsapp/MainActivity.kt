@@ -213,13 +213,10 @@ class MainActivity : AppCompatActivity() {
     private fun processVoiceCloning(customName: String, gender: Gender, refText: String) {
         lifecycleScope.launch {
             LogManager.log("Iniciando clonación para: " + customName)
-            val embedding = voiceCloner.cloneFromAudio(audioFile!!)
-            if (embedding != null) {
-                // Ahora VoiceManager guarda también el texto de referencia
-                voiceManager.saveClonedVoice(embedding, customName, gender, refText)
-                refreshVoiceList()
-                LogManager.log("¡Voz '" + customName + "' guardada con éxito!")
-            }
+            // Ya no necesitamos el embedding de VoiceCloner para guardar, solo el archivo
+            voiceManager.saveClonedVoice(audioFile!!, customName, gender, refText)
+            refreshVoiceList()
+            LogManager.log("¡Voz '" + customName + "' guardada con éxito!")
         }
     }
 

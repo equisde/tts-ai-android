@@ -29,16 +29,16 @@ class VoiceManager(private val context: Context) {
         } ?: emptyList()
     }
 
-    fun saveClonedVoice(embedding: FloatArray, customName: String, gender: Gender, refText: String): VoiceProfile {
+    fun saveClonedVoice(audioSource: File, customName: String, gender: Gender, refText: String): VoiceProfile {
         val id = UUID.randomUUID().toString()
         val genderStr = if (gender == Gender.MALE) "male" else "female"
         val baseName = "${id}_${genderStr}_${customName}"
         
-        // Guardamos el audio real para enviarlo al servidor
+        // FIX: Mover físicamente el archivo de audio a la carpeta permanente
         val audioDest = File(clonedDir, "$baseName.wav")
-        // En una implementación real, aquí moveríamos el archivo temporal al destino final
+        audioSource.copyTo(audioDest, overwrite = true)
         
-        // Guardamos el texto de referencia
+        // Guardar el texto de referencia
         val textFile = File(clonedDir, "$baseName.txt")
         textFile.writeText(refText)
         
@@ -46,21 +46,9 @@ class VoiceManager(private val context: Context) {
     }
 
     fun deleteVoice(profile: VoiceProfile): Boolean {
-        val baseName = profile.referenceAudio?.nameWithoutExtension ?: return false
-        val audioFile = File(clonedDir, "$baseName.wav")
+        val audioFile = profile.referenceAudio ?: return false
+        val baseName = audioFile.nameWithoutExtension
         val textFile = File(clonedDir, "$baseName.txt")
         return audioFile.delete() && textFile.delete()
-    }
-
-    private fun floatArrayToByteArray(floats: FloatArray): ByteArray {
-        val bytes = ByteArray(floats.size * 4)
-        for (i in floats.indices) {
-            val intBits = java.lang.Float.floatToIntBits(floats[i])
-            bytes[i * 4] = (intBits and 0xFF).toByte()
-            bytes[i * 4 + 1] = ((intBits shr 8) and 0xFF).toByte()
-            bytes[i * 4 + 2] = ((intBits shr 16) and 0xFF).toByte()
-            bytes[i * 4 + 3] = ((intBits shr 24) and 0xFF).toByte()
-        }
-        return bytes
     }
 }
