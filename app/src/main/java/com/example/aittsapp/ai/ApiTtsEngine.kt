@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
 class ApiTtsEngine : TtsEngine {
     private val TAG = "ApiTtsEngine"
     private lateinit var client: OkHttpClient
-    private var serverUrl: String = "http://192.168.1.100:8000" // Cambiar por IP real
+    private var serverUrl: String = "http://YOUR_SERVER_IP:8000" // IP de servidor remoto
 
     override fun initialize(context: Context) {
         val prefs = context.getSharedPreferences("TTS_PREFS", Context.MODE_PRIVATE)

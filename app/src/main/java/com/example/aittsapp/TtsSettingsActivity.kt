@@ -27,7 +27,7 @@ class TtsSettingsActivity : AppCompatActivity() {
         val etServerUrl = findViewById<EditText>(R.id.etServerUrl)
         val btnSaveServer = findViewById<MaterialButton>(R.id.btnSaveServer)
         
-        etServerUrl.setText(sharedPrefs.getString("SERVER_URL", "http://192.168.1.100:8000"))
+        etServerUrl.setText(sharedPrefs.getString("SERVER_URL", "http://YOUR_SERVER_IP:8000"))
         
         btnSaveServer.setOnClickListener {
             sharedPrefs.edit().putString("SERVER_URL", etServerUrl.text.toString()).apply()
