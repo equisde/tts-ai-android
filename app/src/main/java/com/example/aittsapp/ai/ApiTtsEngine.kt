@@ -22,52 +22,63 @@ class ApiTtsEngine : TtsEngine {
         serverUrl = prefs.getString("SERVER_URL", "http://YOUR_SERVER_IP:8000") ?: "http://YOUR_SERVER_IP:8000"
         
         client = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .writeTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS) // La clonación puede tardar por Whisper
             .build()
             
-        LogManager.log("Cliente API iniciado apuntando a: " + serverUrl)
+        LogManager.log("Cliente iniciado: " + serverUrl)
     }
 
-    override fun synthesize(text: String, profile: VoiceProfile): ByteArray? {
-        // ERROR FIX: Las peticiones de red NO pueden ir en el hilo principal
-        LogManager.log("Solicitando síntesis para: " + text.take(15) + "...")
+    override suspend fun clone(profile: VoiceProfile): Boolean = withContext(Dispatchers.IO) {
+        LogManager.log("Enviando audio al servidor para clonación...")
+        val audioFile = profile.referenceAudio ?: return@withContext false
         
+        val json = JSONObject().apply {
+            put("voice_id", profile.id)
+            put("reference_text", profile.referenceText)
+        }
+
+        val requestBody = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("data", json.toString())
+            .addFormDataPart("audio", audioFile.name, audioFile.asRequestBody("audio/*".toMediaType()))
+            .build()
+
+        val request = Request.Builder().url(serverUrl + "/clone").post(requestBody).build()
+
+        try {
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                LogManager.log("¡Clonación exitosa en servidor!")
+                return@withContext true
+            }
+            LogManager.log("Fallo clonación: " + response.code)
+        } catch (e: Exception) {
+            LogManager.log("Error de conexión al clonar: " + e.message)
+        }
+        return@withContext false
+    }
+
+    override suspend fun synthesize(text: String, profile: VoiceProfile): ByteArray? = withContext(Dispatchers.IO) {
         try {
             val json = JSONObject().apply {
                 put("text", text)
-                put("reference_text", profile.referenceText)
-                put("gender", if (profile.gender == Gender.MALE) "male" else "female")
-            }
-
-            val requestBody = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart("data", json.toString())
-
-            if (profile.referenceAudio != null && profile.referenceAudio.exists()) {
-                requestBody.addFormDataPart(
-                    "audio", 
-                    profile.referenceAudio.name,
-                    profile.referenceAudio.asRequestBody("audio/*".toMediaType())
-                )
+                put("voice_id", profile.id)
             }
 
             val request = Request.Builder()
                 .url(serverUrl + "/synthesize")
-                .post(requestBody.build())
+                .post(MultipartBody.Builder().setType(MultipartBody.FORM)
+                    .addFormDataPart("data", json.toString()).build())
                 .build()
 
             val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                return response.body?.bytes()
-            } else {
-                LogManager.log("Error Servidor: " + response.code)
-            }
+            if (response.isSuccessful) return@withContext response.body?.bytes()
         } catch (e: Exception) {
-            LogManager.log("Error Red: " + e.message)
+            LogManager.log("Error en síntesis: " + e.message)
         }
-        return null
+        return@withContext null
     }
 
     override fun release() {}

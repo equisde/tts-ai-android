@@ -14,23 +14,12 @@ MODEL_DIR = os.path.join(BASE_DIR, "models", "base")
 PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
 os.makedirs(PROFILES_DIR, exist_ok=True)
 
-models = {
-    "vocab": {}, 
-    "sess_pre": None, 
-    "sess_trans": None, 
-    "sess_dec": None,
-    "whisper": None
-}
+models = {"vocab": {}, "sess_pre": None, "sess_trans": None, "sess_dec": None, "whisper": None}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("=== Iniciando Servidor TTS con Autotranscripción ===")
-    
-    # 1. Cargar Whisper (Modelo base para velocidad y precisión)
-    print("Cargando Whisper STT...")
+    print("=== Servidor IA con Clonación Whisper Activo ===")
     models["whisper"] = whisper.load_model("base")
-    
-    # 2. Cargar Vocabulario
     vocab_path = os.path.join(MODEL_DIR, "vocab.txt")
     if os.path.exists(vocab_path):
         with open(vocab_path, "r", encoding="utf-8") as f:
@@ -42,23 +31,20 @@ async def lifespan(app: FastAPI):
         num_threads = max(1, int(multiprocessing.cpu_count() * 0.9))
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = num_threads
-        
         try:
             models["sess_pre"] = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Preprocess.onnx"), opts)
             models["sess_trans"] = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Transformer.onnx"), opts)
             models["sess_dec"] = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Decode.onnx"), opts)
-            print(f"IA lista. Hilos: {num_threads}")
-        except Exception as e:
-            print(f"Error carga: {e}")
+            print(f"IA Operativa con {num_threads} hilos.")
+        except Exception as e: print(f"Error carga: {e}")
     yield
 
-app = FastAPI(title="F5-TTS Auto-Transcription Server", lifespan=lifespan)
+app = FastAPI(title="F5-TTS Voice Server", lifespan=lifespan)
 
-def get_aligned_tensor(session, input_name, data):
+def align_tensor(session, input_name, data):
     for inp in session.get_inputs():
         if input_name in inp.name:
-            if 'int16' in inp.type:
-                data = (data * 32767).astype(np.int16) if data.dtype == np.float32 else data.astype(np.int16)
+            if 'int16' in inp.type: data = (data * 32767).astype(np.int16) if data.dtype == np.float32 else data.astype(np.int16)
             elif 'float' in inp.type: data = data.astype(np.float32)
             elif 'int64' in inp.type: data = data.astype(np.int64)
             elif 'int32' in inp.type: data = data.astype(np.int32)
@@ -77,49 +63,52 @@ def get_aligned_tensor(session, input_name, data):
             return data
     return data
 
-@app.post("/synthesize")
-async def synthesize(data: str = Form(...), audio: UploadFile = File(None)):
+@app.post("/clone")
+async def clone(data: str = Form(...), audio: UploadFile = File(...)):
     req = json.loads(data)
-    gen_text = req.get("text", "")
-    voice_id = req.get("voice_id", "default")
+    voice_id = req.get("voice_id", "voice")
     ref_text = req.get("reference_text", "")
     
     p_audio = os.path.join(PROFILES_DIR, f"{voice_id}.wav")
     p_text = os.path.join(PROFILES_DIR, f"{voice_id}.txt")
 
-    # 1. Procesar nuevo audio de referencia
-    if audio:
-        audio_bytes = await audio.read()
-        with open(p_audio, "wb") as f: f.write(audio_bytes)
-        
-        # TRANSCRIPCIÓN AUTOMÁTICA si no se envió texto
-        if not ref_text:
-            print("Iniciando autotranscripción con Whisper...")
-            result = models["whisper"].transcribe(p_audio, language="es")
-            ref_text = result["text"].strip()
-            print(f"Texto detectado: {ref_text}")
-            with open(p_text, "w", encoding="utf-8") as f: f.write(ref_text)
-        else:
-            with open(p_text, "w", encoding="utf-8") as f: f.write(ref_text)
+    audio_bytes = await audio.read()
+    with open(p_audio, "wb") as f: f.write(audio_bytes)
     
-    # 2. Cargar Perfil
-    if os.path.exists(p_audio):
+    if not ref_text:
+        print(f"Transcribiendo audio de clonación: {voice_id}")
+        result = models["whisper"].transcribe(p_audio, language="es")
+        ref_text = result["text"].strip()
+        print(f"Whisper detectó: {ref_text}")
+    
+    with open(p_text, "w", encoding="utf-8") as f: f.write(ref_text)
+    return {"status": "success", "text": ref_text}
+
+@app.post("/synthesize")
+async def synthesize(data: str = Form(...)):
+    req = json.loads(data)
+    gen_text = req.get("text", "")
+    voice_id = req.get("voice_id", "default")
+    
+    p_audio = os.path.join(PROFILES_DIR, f"{voice_id}.wav")
+    p_text = os.path.join(PROFILES_DIR, f"{voice_id}.txt")
+
+    if os.path.exists(p_audio) and os.path.exists(p_text):
         ref_audio, _ = librosa.load(p_audio, sr=24000, mono=True)
-        if not ref_text and os.path.exists(p_text):
-            with open(p_text, "r", encoding="utf-8") as f: ref_text = f.read()
+        with open(p_text, "r", encoding="utf-8") as f: ref_text = f.read()
     else:
+        # Fallback a voz base (Mujer Chilena)
         ref_audio = np.zeros(24000, dtype=np.float32)
         ref_text = ""
 
     tokens = np.array([models["vocab"].get(c, 0) for c in (ref_text + gen_text)], dtype=np.int64)
     max_dur = np.array([int(len(ref_audio)/256 + 1 + len(gen_text)*2)], dtype=np.int64)
     
-    # Pipeline IA
     pre_inputs = {}
     for inp in models["sess_pre"].get_inputs():
-        if 'audio' in inp.name: pre_inputs[inp.name] = get_aligned_tensor(models["sess_pre"], 'audio', np.expand_dims(ref_audio, axis=(0,1)))
-        elif 'text_ids' in inp.name: pre_inputs[inp.name] = get_aligned_tensor(models["sess_pre"], 'text_ids', np.expand_dims(tokens, axis=0))
-        elif 'max_duration' in inp.name: pre_inputs[inp.name] = get_aligned_tensor(models["sess_pre"], 'max_duration', max_dur)
+        if 'audio' in inp.name: pre_inputs[inp.name] = align_tensor(models["sess_pre"], 'audio', np.expand_dims(ref_audio, axis=(0,1)))
+        elif 'text_ids' in inp.name: pre_inputs[inp.name] = align_tensor(models["sess_pre"], 'text_ids', np.expand_dims(tokens, axis=0))
+        elif 'max_duration' in inp.name: pre_inputs[inp.name] = align_tensor(models["sess_pre"], 'max_duration', max_dur)
 
     pre_outs = models["sess_pre"].run(None, pre_inputs)
     noise = pre_outs[0]
@@ -127,7 +116,7 @@ async def synthesize(data: str = Form(...), audio: UploadFile = File(None)):
     for step in range(30):
         trans_inputs = {inp.name: pre_outs[i+1] for i, inp in enumerate(models["sess_trans"].get_inputs()) if i < 6}
         trans_inputs[models["sess_trans"].get_inputs()[6].name] = noise
-        trans_inputs[models["sess_trans"].get_inputs()[7].name] = get_aligned_tensor(models["sess_trans"], 'time_step', np.array([step]))
+        trans_inputs[models["sess_trans"].get_inputs()[7].name] = align_tensor(models["sess_trans"], 'time_step', np.array([step]))
         noise = models["sess_trans"].run(None, trans_inputs)[0]
         
     audio_out = models["sess_dec"].run(None, {"denoised": noise, "ref_signal_len": pre_outs[7]})[0]

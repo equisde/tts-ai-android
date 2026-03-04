@@ -91,16 +91,11 @@ class MainActivity : AppCompatActivity() {
                 if (selectedVoiceIndex >= 0 && selectedVoiceIndex < all.size) {
                     val profile = all[selectedVoiceIndex]
                     LogManager.log("Probando voz: " + profile.name)
-                    
                     val pcm = withContext(Dispatchers.IO) { 
                         voiceCloner.synthesizeForTest(text, profile) 
                     }
-                    
-                    if (pcm != null && pcm.isNotEmpty()) {
-                        audioPlayer.playPcm(pcm)
-                    } else {
-                        LogManager.log("ERROR: La IA no devolvió audio")
-                    }
+                    if (pcm != null && pcm.isNotEmpty()) audioPlayer.playPcm(pcm)
+                    else LogManager.log("ERROR: Sin respuesta del servidor")
                 }
             }
         }
@@ -127,35 +122,20 @@ class MainActivity : AppCompatActivity() {
     private fun showCloningDialog() {
         val builder = AlertDialog.Builder(this)
         builder.setTitle("Clonación Inteligente")
-        
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 20, 50, 20)
         }
-
         val inputName = EditText(this).apply { hint = "Nombre de la voz" }
         container.addView(inputName)
-
-        val inputRefText = EditText(this).apply { 
-            hint = "¿Qué dice el audio de 30s? (Crucial)" 
-            minLines = 2
-        }
+        val inputRefText = EditText(this).apply { hint = "¿Qué dices en el audio? (Opcional)" }
         container.addView(inputRefText)
-
-        val labelGender = TextView(this).apply {
-            text = "Género de la voz:"
-            setPadding(0, 20, 0, 10)
-        }
-        container.addView(labelGender)
-
         val rgGender = RadioGroup(this)
         val rbFemale = RadioButton(this).apply { text = "Mujer"; id = View.generateViewId(); isChecked = true }
         val rbMale = RadioButton(this).apply { text = "Hombre"; id = View.generateViewId() }
         rgGender.addView(rbFemale); rgGender.addView(rbMale)
         container.addView(rgGender)
-
         builder.setView(container)
-
         builder.setPositiveButton("Clonar") { _, _ ->
             val name = inputName.text.toString().ifEmpty { "Voz Clonada" }
             val refText = inputRefText.text.toString()
@@ -166,15 +146,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showDeleteDialog(profile: VoiceProfile) {
-        AlertDialog.Builder(this)
-            .setTitle("Eliminar voz")
-            .setMessage("¿Eliminar '" + profile.name + "'?")
+        AlertDialog.Builder(this).setTitle("Eliminar voz").setMessage("¿Eliminar '" + profile.name + "'?")
             .setPositiveButton("Eliminar") { _, _ ->
-                if (voiceManager.deleteVoice(profile)) {
-                    refreshVoiceList()
-                }
-            }
-            .setNegativeButton("Cancelar", null).show()
+                if (voiceManager.deleteVoice(profile)) refreshVoiceList()
+            }.setNegativeButton("Cancelar", null).show()
     }
 
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -191,10 +166,10 @@ class MainActivity : AppCompatActivity() {
     private fun startRecording() {
         try {
             isRecording = true
-            audioFile = File(cacheDir, "recorded_voice.amr")
+            audioFile = File(cacheDir, "recorded_voice.wav")
             recorder = MediaRecorder().apply {
                 setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.AMR_WB)
+                setOutputFormat(MediaRecorder.OutputFormat.THREE_GPP)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AMR_WB)
                 setOutputFile(audioFile!!.absolutePath)
                 prepare(); start()
@@ -212,11 +187,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun processVoiceCloning(customName: String, gender: Gender, refText: String) {
         lifecycleScope.launch {
-            LogManager.log("Iniciando clonación para: " + customName)
-            // Ya no necesitamos el embedding de VoiceCloner para guardar, solo el archivo
-            voiceManager.saveClonedVoice(audioFile!!, customName, gender, refText)
-            refreshVoiceList()
-            LogManager.log("¡Voz '" + customName + "' guardada con éxito!")
+            LogManager.log("Iniciando clonación remota...")
+            val profile = voiceManager.saveClonedVoice(audioFile!!, customName, gender, refText)
+            
+            // LLAMADA REAL AL SERVIDOR
+            val success = voiceCloner.cloneRemote(profile)
+            
+            if (success) {
+                refreshVoiceList()
+                LogManager.log("¡Voz '" + customName + "' clonada con éxito!")
+            } else {
+                LogManager.log("ERROR: El servidor no pudo procesar la clonación")
+            }
         }
     }
 
