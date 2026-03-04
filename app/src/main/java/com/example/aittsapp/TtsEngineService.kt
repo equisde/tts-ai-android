@@ -53,7 +53,7 @@ class TtsEngineService : TextToSpeechService() {
         allProfiles.forEach { profile ->
             val locale = Locale("es", "CL")
             val features = mutableSetOf<String>()
-            if (profile.isCloned) features.add(TextToSpeech.Engine.KEY_FEATURE_NETWORK_RETTIMEOUT) // Solo como marcador
+            if (profile.isCloned) features.add("cloned_voice") 
             
             voices.add(Voice(
                 profile.id,
