@@ -5,3 +5,5 @@ numpy
 python-multipart
 soundfile
 librosa
+openai-whisper
+ffmpeg-python
