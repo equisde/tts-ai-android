@@ -49,6 +49,11 @@ class MainActivity : AppCompatActivity() {
         setupUI()
         refreshVoiceList()
         
+        // Observar Logs
+        com.example.aittsapp.engine.LogManager.logUpdates.observe(this) { logs ->
+            findViewById<TextView>(R.id.tvAiLogs).text = logs
+        }
+        
         if (!permissionsManager.hasAllPermissions()) {
             permissionsManager.requestPermissions(PermissionsManager.PERMISSIONS_REQUEST_CODE)
         }

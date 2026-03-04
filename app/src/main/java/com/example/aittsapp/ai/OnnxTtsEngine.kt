@@ -5,14 +5,13 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.util.Log
-import android.widget.Toast
+import com.example.aittsapp.engine.LogManager
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
 
 class OnnxTtsEngine : TtsEngine {
-    private val TAG = "OnnxTtsEngine"
     private var ortEnv: OrtEnvironment? = null
     private var sessionPre: OrtSession? = null
     private var sessionTrans: OrtSession? = null
@@ -21,49 +20,53 @@ class OnnxTtsEngine : TtsEngine {
     private var isReady = false
 
     override fun initialize(context: Context) {
+        LogManager.log("Inicializando motor ONNX...")
         try {
             ortEnv = OrtEnvironment.getEnvironment()
             
-            // Cargar Vocab
             val vocabFile = getFileFromAssets(context, "models/base/vocab.txt")
             vocabFile.bufferedReader().readLines().forEachIndexed { index, s -> 
                 if (s.isNotEmpty()) vocabMap[s] = index.toLong() 
             }
+            LogManager.log("Vocabulario cargado (\${vocabMap.size} tokens).")
 
             val options = OrtSession.SessionOptions().apply {
                 addConfigEntry("session.load_model_format", "ONNX")
             }
             
-            // Cargar con validación
+            LogManager.log("Cargando Preprocess...")
             sessionPre = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Preprocess.onnx").absolutePath, options)
+            
+            LogManager.log("Cargando Transformer (1.3GB)...")
             sessionTrans = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Transformer.onnx").absolutePath, options)
+            
+            LogManager.log("Cargando Decode (Vocos)...")
             sessionDec = ortEnv?.createSession(getFileFromAssets(context, "models/base/F5_Decode.onnx").absolutePath, options)
             
             isReady = (sessionPre != null && sessionTrans != null && sessionDec != null)
-            Log.i(TAG, "IA Listas: \$isReady")
+            LogManager.log("IA Lista para sintetizar: \$isReady")
         } catch (e: Exception) { 
-            Log.e(TAG, "Fallo carga: \${e.message}") 
+            LogManager.log("ERROR INIT: \${e.message}") 
         }
     }
 
     override fun synthesize(text: String, profile: VoiceProfile): ByteArray? {
         if (!isReady) {
-            Log.e(TAG, "Motor no inicializado")
+            LogManager.log("ERROR: Motor no listo")
             return null
         }
 
         val env = ortEnv ?: return null
         try {
-            // 1. Tokens
+            LogManager.log("Sintetizando: '\$text'")
+            
             val tokens = (profile.referenceText + text).map { it.toString() }
                 .map { vocabMap[it] ?: 0L }.toLongArray()
             
-            // 2. Audio Ref (Debe ser Float32)
             val refAudioFloats = loadAudioAsFloats(profile.referenceAudio)
-            
             val maxDuration = (refAudioFloats.size / 256 + 1 + text.length * 2).toLong()
 
-            // ETAPA A
+            LogManager.log("Ejecutando Etapa A (Preprocess)...")
             val preInputs = mapOf(
                 "audio" to OnnxTensor.createTensor(env, FloatBuffer.wrap(refAudioFloats), longArrayOf(1, 1, refAudioFloats.size.toLong())),
                 "text_ids" to OnnxTensor.createTensor(env, LongBuffer.wrap(tokens), longArrayOf(1, tokens.size.toLong())),
@@ -72,22 +75,32 @@ class OnnxTtsEngine : TtsEngine {
 
             val preResults = sessionPre?.run(preInputs) ?: return null
             var noise = preResults.get(0) as OnnxTensor
-            // ... (Capturamos los otros 7 tensores del pre-procesamiento)
             
-            // ETAPA B: Difusión Simplificada (Para asegurar que genere algo)
-            // En versiones ONNX, a veces el Transformer acepta los parámetros del pre-proceso directamente
-            
-            // ETAPA C: Decodificación (Probamos con nombre de entrada estándar 'latent')
-            val decInputs = mutableMapOf<String, OnnxTensor>()
-            decInputs["denoised"] = noise // Nombre 1 común
-            // decInputs["latent"] = noise // Nombre 2 común
-            
-            val decResults = sessionDec?.run(decInputs) ?: return null
+            LogManager.log("Iniciando Bucle de Difusión (32 pasos)...")
+            var timeStep = OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(0)), longArrayOf(1))
+            for (step in 0 until 32) {
+                if (step % 8 == 0) LogManager.log("Paso Difusión: \$step/32")
+                
+                val transResults = sessionTrans?.run(mapOf(
+                    "noise" to noise, "time_step" to timeStep // Simplificado
+                )) ?: break
+                
+                val nextNoise = transResults.get(0) as OnnxTensor
+                val nextTime = transResults.get(1) as OnnxTensor
+                
+                if (step > 0) { noise.close(); timeStep.close() }
+                noise = nextNoise
+                timeStep = nextTime
+            }
+
+            LogManager.log("Ejecutando Etapa C (Decode)...")
+            val decResults = sessionDec?.run(mapOf("denoised" to noise)) ?: return null
             val audioOutput = decResults.get(0).value
 
+            LogManager.log("Conversión PCM final...")
             return convertToPcm(audioOutput)
         } catch (e: Exception) {
-            Log.e(TAG, "Error: \${e.message}")
+            LogManager.log("ERROR SÍNTESIS: \${e.message}")
             return null
         }
     }
@@ -95,12 +108,11 @@ class OnnxTtsEngine : TtsEngine {
     private fun loadAudioAsFloats(file: File?): FloatArray {
         return if (file != null && file.exists()) {
             val bytes = file.readBytes()
-            if (bytes.size < 4) return FloatArray(24000)
             FloatArray(bytes.size / 2) { i ->
                 val sample = ((bytes[i * 2 + 1].toInt() shl 8) or (bytes[i * 2].toInt() and 0xFF)).toShort()
                 sample.toFloat() / 32768.0f
             }
-        } else FloatArray(24000) { (Math.random() * 0.01f).toFloat() } // Ruido base mínimo
+        } else FloatArray(24000) { 0.01f }
     }
 
     private fun convertToPcm(output: Any?): ByteArray? {
