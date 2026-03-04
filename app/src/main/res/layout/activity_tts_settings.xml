@@ -56,7 +56,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
                 android:text="Modo Alta Calidad (32 pasos)"
-                android:textColor="?attr/textColorPrimary"
+                android:textColor="?android:attr/textColorPrimary"
                 app:thumbTint="?attr/colorPrimary"/>
                 
         </LinearLayout>
