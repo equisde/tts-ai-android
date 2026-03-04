@@ -8,6 +8,7 @@ import android.widget.RadioGroup
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.example.aittsapp.ai.VoiceManager
+import com.example.aittsapp.ai.Gender
 import com.google.android.material.button.MaterialButton
 
 class TtsSettingsActivity : AppCompatActivity() {
@@ -31,7 +32,8 @@ class TtsSettingsActivity : AppCompatActivity() {
         allVoices.forEach { profile ->
             val rb = RadioButton(this).apply {
                 val type = if (profile.isCloned) "Clonada" else "Base"
-                text = "\${profile.name} (\$type)"
+                val genderStr = if (profile.gender == Gender.MALE) "Hombre" else "Mujer"
+                text = "${profile.name} ($genderStr - $type)"
                 id = profile.id.hashCode() // ID único
                 tag = profile.id
                 setTextColor(getColor(android.R.color.white))

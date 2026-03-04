@@ -1,13 +1,12 @@
 package com.example.aittsapp.ai
 
 import android.content.Context
-import android.util.Log
 import java.io.File
 import java.util.UUID
 
 /**
- * Gestor de perfiles de voz.
- * Mantiene las voces predefinidas (CL-Hombre/Mujer) y las clonadas.
+ * Gestor de perfiles de voz mejorado.
+ * Permite guardar, listar y eliminar voces clonadas con metadatos (Género).
  */
 class VoiceManager(private val context: Context) {
     
@@ -20,25 +19,35 @@ class VoiceManager(private val context: Context) {
         )
     }
 
+    /**
+     * Recupera las voces clonadas. 
+     * Formato de archivo esperado: id_gender_name.bin
+     */
     fun getClonedVoices(): List<VoiceProfile> {
-        return clonedDir.listFiles()?.map { file ->
-            VoiceProfile(
-                id = file.nameWithoutExtension,
-                name = "Voz Personalizada",
-                gender = Gender.FEMALE,
-                isCloned = true,
-                referenceAudio = file,
-                referenceText = ""
-            )
+        return clonedDir.listFiles()?.mapNotNull { file ->
+            val parts = file.nameWithoutExtension.split("_")
+            if (parts.size >= 3) {
+                val id = parts[0]
+                val gender = if (parts[1].lowercase() == "male") Gender.MALE else Gender.FEMALE
+                val name = parts[2]
+                VoiceProfile(id, name, "es-CL", gender, true, file, "")
+            } else null
         } ?: emptyList()
     }
 
-    fun saveClonedVoice(embedding: FloatArray, customName: String): VoiceProfile {
+    fun saveClonedVoice(embedding: FloatArray, customName: String, gender: Gender): VoiceProfile {
         val id = UUID.randomUUID().toString()
-        val file = File(clonedDir, "\$id.bin")
+        val genderStr = if (gender == Gender.MALE) "male" else "female"
+        // Guardamos metadatos en el nombre del archivo para simplicidad
+        val fileName = "${id}_${genderStr}_${customName}.bin"
+        val file = File(clonedDir, fileName)
         file.writeBytes(floatArrayToByteArray(embedding))
         
-        return VoiceProfile(id, customName, "es-CL", Gender.FEMALE, true, file, "")
+        return VoiceProfile(id, customName, "es-CL", gender, true, file, "")
+    }
+
+    fun deleteVoice(profile: VoiceProfile): Boolean {
+        return profile.referenceAudio?.delete() ?: false
     }
 
     private fun floatArrayToByteArray(floats: FloatArray): ByteArray {
