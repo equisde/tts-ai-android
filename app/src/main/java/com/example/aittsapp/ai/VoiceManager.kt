@@ -27,7 +27,8 @@ class VoiceManager(private val context: Context) {
                 name = "Voz Clonada - \${file.nameWithoutExtension.take(4)}",
                 gender = Gender.FEMALE, // Podría inferirse
                 isCloned = true,
-                embeddingFile = file
+                referenceAudio = file,
+                referenceText = ""
             )
         } ?: emptyList()
     }
@@ -38,7 +39,7 @@ class VoiceManager(private val context: Context) {
         // Guardar los bytes del embedding para uso futuro
         file.writeBytes(floatArrayToByteArray(embedding))
         
-        return VoiceProfile(id, "Nueva Voz Clonada", "es-CL", Gender.FEMALE, true, file)
+        return VoiceProfile(id, "Nueva Voz Clonada", "es-CL", Gender.FEMALE, true, file, "")
     }
 
     private fun floatArrayToByteArray(floats: FloatArray): ByteArray {

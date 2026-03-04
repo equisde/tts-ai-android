@@ -25,38 +25,28 @@ class OnnxTtsEngine : TtsEngine {
     override fun initialize(context: Context) {
         try {
             ortEnv = OrtEnvironment.getEnvironment()
-            
-            // 1. Cargar Vocabulario Real
             val vocabText = context.assets.open("models/base/vocab.txt").bufferedReader().readLines()
             vocabText.forEachIndexed { index, s -> if (s.isNotEmpty()) vocabMap[s[0]] = index }
 
-            // 2. Inicializar Sesiones con Aceleración NNAPI (Android 15)
             val options = OrtSession.SessionOptions().apply { addNnapi() }
-            
             sessionPre = ortEnv?.createSession(context.assets.open("models/base/F5_Preprocess.onnx").readBytes(), options)
             sessionTrans = ortEnv?.createSession(context.assets.open("models/base/F5_Transformer.onnx").readBytes(), options)
             sessionDec = ortEnv?.createSession(context.assets.open("models/base/F5_Decode.onnx").readBytes(), options)
-            
-            Log.i(TAG, "Motor AI F5-TTS (Chilean Edition) completamente operativo.")
         } catch (e: Exception) {
-            Log.e(TAG, "Error al cargar la IA: \${e.message}")
+            Log.e(TAG, "Init error: \${e.message}")
         }
     }
 
     override fun synthesize(text: String, profile: VoiceProfile): ByteArray? {
         val env = ortEnv ?: return null
-        
         try {
-            // --- ETAPA 1: PRE-PROCESAMIENTO ---
             val combinedText = profile.referenceText + text
             val tokens = combinedText.map { vocabMap[it] ?: 0 }.toIntArray()
             val refAudioShorts = loadAudioAsShorts(profile.referenceAudio)
             
-            // Calcular duración máxima (basado en ratio de texto)
             val refTextLen = profile.referenceText.length.coerceAtLeast(1)
-            val genTextLen = text.length
             val refAudioLen = refAudioShorts.size / HOP_LENGTH + 1
-            val maxDuration = (refAudioLen + (refAudioLen.toFloat() / refTextLen * genTextLen)).toLong()
+            val maxDuration = (refAudioLen + (refAudioLen.toFloat() / refTextLen * text.length)).toLong()
 
             val preInputs = mapOf(
                 "audio" to OnnxTensor.createTensor(env, ShortBuffer.wrap(refAudioShorts), longArrayOf(1, 1, refAudioShorts.size.toLong())),
@@ -65,8 +55,6 @@ class OnnxTtsEngine : TtsEngine {
             )
 
             val preResults = sessionPre?.run(preInputs) ?: return null
-            
-            // Extraer tensores intermedios para el bucle
             var noise = preResults.get(0) as OnnxTensor
             val ropeCosQ = preResults.get(1) as OnnxTensor
             val ropeSinQ = preResults.get(2) as OnnxTensor
@@ -76,38 +64,20 @@ class OnnxTtsEngine : TtsEngine {
             val catMelTextDrop = preResults.get(6) as OnnxTensor
             val refSignalLen = preResults.get(7) as OnnxTensor
 
-            // --- ETAPA 2: BUCLE DE DIFUSIÓN (32 PASOS) ---
-            Log.i(TAG, "Iniciando bucle de difusión IA...")
             var timeStep = OnnxTensor.createTensor(env, IntBuffer.wrap(intArrayOf(0)), longArrayOf(1))
-            
             for (step in 0 until 32) {
-                val transInputs = mapOf(
-                    "noise" to noise,
-                    "rope_cos_q" to ropeCosQ, "rope_sin_q" to ropeSinQ,
+                val transResults = sessionTrans?.run(mapOf(
+                    "noise" to noise, "rope_cos_q" to ropeCosQ, "rope_sin_q" to ropeSinQ,
                     "rope_cos_k" to ropeCosK, "rope_sin_k" to ropeSinK,
-                    "cat_mel_text" to catMelText, "cat_mel_text_drop" to catMelTextDrop,
-                    "time_step" to timeStep
-                )
-                
-                val transResults = sessionTrans?.run(transInputs) ?: break
+                    "cat_mel_text" to catMelText, "cat_mel_text_drop" to catMelTextDrop, "time_step" to timeStep
+                )) ?: break
                 noise = transResults.get(0) as OnnxTensor
                 timeStep = transResults.get(1) as OnnxTensor
             }
 
-            // --- ETAPA 3: DECODIFICACIÓN (VOCOS) ---
-            val decInputs = mapOf(
-                "denoised" to noise,
-                "ref_signal_len" to refSignalLen
-            )
-            
-            val decResults = sessionDec?.run(decInputs) ?: return null
-            val audioOutput = decResults.get(0).value as ShortArray
-            
-            // Convertir ShortArray a ByteArray (PCM 16-bit)
-            return shortArrayToByteArray(audioOutput)
-
+            val decResults = sessionDec?.run(mapOf("denoised" to noise, "ref_signal_len" to refSignalLen)) ?: return null
+            return shortArrayToByteArray(decResults.get(0).value as ShortArray)
         } catch (e: Exception) {
-            Log.e(TAG, "Error durante la síntesis: \${e.message}")
             return null
         }
     }
@@ -115,17 +85,15 @@ class OnnxTtsEngine : TtsEngine {
     private fun loadAudioAsShorts(file: File?): ShortArray {
         return if (file != null && file.exists()) {
             val bytes = file.readBytes()
-            ShortArray(bytes.size / 2) { i ->
-                ((bytes[i * 2 + 1].toInt() shl 8) or (bytes[i * 2].toInt() and 0xFF)).toShort()
-            }
-        } else ShortArray(SAMPLE_RATE * 2) // 2 segundos de silencio
+            ShortArray(bytes.size / 2) { i -> ((bytes[i * 2 + 1].toInt() shl 8) or (bytes[i * 2].toInt() and 0xFF)).toShort() }
+        } else ShortArray(SAMPLE_RATE * 2)
     }
 
     private fun shortArrayToByteArray(shorts: ShortArray): ByteArray {
         val bytes = ByteArray(shorts.size * 2)
         for (i in shorts.indices) {
-            bytes[i * 2] = (shorts[i].toInt() and 0x00FF).toByte()
-            bytes[i * 2 + 1] = ((shorts[i].toInt() and 0xFF00) ushr 8).toByte()
+            bytes[i * 2] = (shorts[i].toInt() and 0xFF).toByte()
+            bytes[i * 2 + 1] = ((shorts[i].toInt() shr 8) and 0xFF).toByte()
         }
         return bytes
     }

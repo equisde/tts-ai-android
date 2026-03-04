@@ -56,11 +56,17 @@ class TtsEngineService : TextToSpeechService() {
         if (request == null || callback == null) return
         
         val text = request.charSequenceText.toString()
-        val voiceName = request.voiceName ?: "cl-female-base"
+        
+        // Leer la preferencia del usuario desde los ajustes
+        val sharedPrefs = getSharedPreferences("TTS_PREFS", android.content.Context.MODE_PRIVATE)
+        val defaultVoiceId = sharedPrefs.getString("DEFAULT_VOICE_ID", "cl-female-base")
+        
+        // El sistema puede solicitar una voz específica, si no, usamos la elegida por el usuario
+        val voiceName = request.voiceName ?: defaultVoiceId
 
         // 1. Buscar el perfil de voz (Base o Clonada)
         val allVoices = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
-        val selectedProfile = allVoices.find { it.id == voiceName } ?: allVoices[0]
+        val selectedProfile = allVoices.find { it.id == voiceName } ?: allVoices.find { it.id == defaultVoiceId } ?: allVoices[0]
 
         // 2. Configuración de audio profesional (24kHz es estándar para IA de alta calidad)
         val sampleRate = 24000

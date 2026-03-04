@@ -1,29 +1,30 @@
 package com.example.aittsapp
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Bundle
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.ListView
-import android.widget.Toast
+import android.provider.Settings
+import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.aittsapp.ai.VoiceCloner
 import com.example.aittsapp.ai.VoiceManager
 import com.example.aittsapp.ai.VoiceProfile
+import com.example.aittsapp.audio.AudioTestPlayer
+import com.example.aittsapp.engine.PermissionsManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var voiceManager: VoiceManager
     private lateinit var voiceCloner: VoiceCloner
+    private lateinit var permissionsManager: PermissionsManager
+    private val audioPlayer = AudioTestPlayer()
     
     private var recorder: MediaRecorder? = null
     private var audioFile: File? = null
@@ -31,6 +32,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var adapter: ArrayAdapter<String>
     private val voiceNames = mutableListOf<String>()
+    private var selectedVoiceIndex = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,48 +40,56 @@ class MainActivity : AppCompatActivity() {
 
         voiceManager = VoiceManager(this)
         voiceCloner = VoiceCloner(this)
+        permissionsManager = PermissionsManager(this)
 
         setupUI()
         refreshVoiceList()
-        checkPermissions()
+        
+        if (!permissionsManager.hasAllPermissions()) {
+            permissionsManager.requestPermissions(PermissionsManager.PERMISSIONS_REQUEST_CODE)
+        }
     }
 
     private fun setupUI() {
         val btnRecord = findViewById<Button>(R.id.btnRecordVoice)
+        val btnPickFile = findViewById<Button>(R.id.btnPickFile)
         val btnProcess = findViewById<Button>(R.id.btnProcessCloning)
+        val btnTestVoice = findViewById<Button>(R.id.btnTestVoice)
+        val etTestText = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.etTestText)
+        val btnSystemSettings = findViewById<Button>(R.id.btnOpenSystemSettings)
+        val listView = findViewById<ListView>(R.id.listViewVoices)
         
-        // 1. Lógica de Micrófono (Grabar 30s)
         btnRecord.setOnClickListener {
-            if (!isRecording) {
-                startRecording()
-                btnRecord.text = "Detener Grabación (30s máx)"
-            } else {
-                stopRecording()
-                btnRecord.text = "Grabar/Subir 30s de audio"
-            }
+            if (!isRecording) startRecording() else stopRecording()
         }
 
-        // 2. Lógica de Selección de Archivo
-        val btnPickFile = Button(this).apply {
-            text = "Seleccionar archivo de audio"
-            setOnClickListener { filePickerLauncher.launch("audio/*") }
-        }
-        (findViewById<android.view.ViewGroup>(android.R.id.content).getChildAt(0) as? android.widget.LinearLayout)?.addView(btnPickFile, 2)
+        btnPickFile.setOnClickListener { filePickerLauncher.launch("audio/*") }
 
-        // 3. Procesar Clonación
         btnProcess.setOnClickListener {
-            if (audioFile == null || !audioFile!!.exists()) {
-                Toast.makeText(this, "Primero graba o sube un audio", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            processVoiceCloning()
+            if (audioFile != null && audioFile!!.exists()) processVoiceCloning()
+            else Toast.makeText(this, "Primero graba o sube un audio", Toast.LENGTH_SHORT).show()
         }
 
-        // Lista de voces
-        val listView = ListView(this)
-        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, voiceNames)
+        btnTestVoice.setOnClickListener {
+            val text = etTestText.text.toString()
+            lifecycleScope.launch {
+                val all = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
+                if (selectedVoiceIndex < all.size) {
+                    Toast.makeText(this@MainActivity, "Generando audio...", Toast.LENGTH_SHORT).show()
+                    val pcm = withContext(Dispatchers.Default) { 
+                        voiceCloner.synthesizeForTest(text, all[selectedVoiceIndex]) 
+                    }
+                    pcm?.let { audioPlayer.playPcm(it) }
+                }
+            }
+        }
+
+        btnSystemSettings.setOnClickListener { startActivity(Intent("com.android.settings.TTS_SETTINGS")) }
+
+        adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_single_choice, voiceNames)
         listView.adapter = adapter
-        (findViewById<android.view.ViewGroup>(android.R.id.content).getChildAt(0) as? android.widget.LinearLayout)?.addView(listView)
+        listView.choiceMode = ListView.CHOICE_MODE_SINGLE
+        listView.setOnItemClickListener { _, _, position, _ -> selectedVoiceIndex = position }
     }
 
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -89,42 +99,40 @@ class MainActivity : AppCompatActivity() {
                 tempFile.outputStream().use { output -> input.copyTo(output) }
             }
             audioFile = tempFile
-            Toast.makeText(this, "Audio cargado correctamente", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Audio cargado", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun startRecording() {
-        isRecording = true
-        audioFile = File(cacheDir, "recorded_voice.amr")
-        recorder = MediaRecorder().apply {
-            setAudioSource(MediaRecorder.AudioSource.MIC)
-            setOutputFormat(MediaRecorder.OutputFormat.AMR_WB)
-            setAudioEncoder(MediaRecorder.AudioEncoder.AMR_WB)
-            setOutputFile(audioFile!!.absolutePath)
-            prepare()
-            start()
-        }
-        Toast.makeText(this, "Grabando...", Toast.LENGTH_SHORT).show()
+        try {
+            isRecording = true
+            audioFile = File(cacheDir, "recorded_voice.amr")
+            recorder = MediaRecorder().apply {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setOutputFormat(MediaRecorder.OutputFormat.AMR_WB)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AMR_WB)
+                setOutputFile(audioFile!!.absolutePath)
+                prepare(); start()
+            }
+            findViewById<Button>(R.id.btnRecordVoice).text = "Detener Grabación"
+        } catch (e: Exception) { isRecording = false }
     }
 
     private fun stopRecording() {
         isRecording = false
-        recorder?.apply {
-            stop()
-            release()
-        }
+        recorder?.apply { stop(); release() }
         recorder = null
-        Toast.makeText(this, "Grabación guardada", Toast.LENGTH_SHORT).show()
+        findViewById<Button>(R.id.btnRecordVoice).text = "Grabar/Subir 30s de audio"
     }
 
     private fun processVoiceCloning() {
         lifecycleScope.launch {
-            Toast.makeText(this@MainActivity, "IA analizando voz (clonación zero-shot)...", Toast.LENGTH_LONG).show()
+            Toast.makeText(this@MainActivity, "Analizando identidad vocal...", Toast.LENGTH_SHORT).show()
             val embedding = voiceCloner.cloneFromAudio(audioFile!!)
             if (embedding != null) {
-                val profile = voiceManager.saveClonedVoice(embedding)
-                Toast.makeText(this@MainActivity, "¡Voz '\${profile.name}' agregada!", Toast.LENGTH_LONG).show()
+                voiceManager.saveClonedVoice(embedding)
                 refreshVoiceList()
+                Toast.makeText(this@MainActivity, "¡Voz clonada añadida!", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -132,13 +140,17 @@ class MainActivity : AppCompatActivity() {
     private fun refreshVoiceList() {
         val allVoices = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
         voiceNames.clear()
-        allVoices.forEach { voiceNames.add("\${it.name} (\${if (it.isCloned) "Clonada" else "Base"})") }
-        adapter.notifyDataSetChanged()
+        allVoices.forEach { 
+            val type = if (it.isCloned) "Clonada" else "Base"
+            voiceNames.add("\${it.name} (\$type)") 
+        }
+        if (::adapter.isInitialized) adapter.notifyDataSetChanged()
     }
 
-    private fun checkPermissions() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 100)
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PermissionsManager.PERMISSIONS_REQUEST_CODE && permissionsManager.hasAllPermissions()) {
+            Toast.makeText(this, "Permisos listos", Toast.LENGTH_SHORT).show()
         }
     }
 }
