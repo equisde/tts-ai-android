@@ -18,6 +18,7 @@ import com.example.aittsapp.ai.VoiceProfile
 import com.example.aittsapp.ai.Gender
 import com.example.aittsapp.audio.AudioTestPlayer
 import com.example.aittsapp.engine.PermissionsManager
+import com.example.aittsapp.engine.LogManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -49,8 +50,7 @@ class MainActivity : AppCompatActivity() {
         setupUI()
         refreshVoiceList()
         
-        // Observar Logs
-        com.example.aittsapp.engine.LogManager.logUpdates.observe(this) { logs ->
+        LogManager.logUpdates.observe(this) { logs ->
             findViewById<TextView>(R.id.tvAiLogs).text = logs
         }
         
@@ -75,11 +75,8 @@ class MainActivity : AppCompatActivity() {
         btnPickFile.setOnClickListener { filePickerLauncher.launch("audio/*") }
 
         btnProcess.setOnClickListener {
-            if (audioFile != null && audioFile!!.exists()) {
-                showNameAndGenderDialog()
-            } else {
-                Toast.makeText(this, "Primero graba o sube un audio", Toast.LENGTH_SHORT).show()
-            }
+            if (audioFile != null && audioFile!!.exists()) showNameAndGenderDialog()
+            else Toast.makeText(this, "Primero graba o sube un audio", Toast.LENGTH_SHORT).show()
         }
 
         btnTestVoice.setOnClickListener {
@@ -90,9 +87,18 @@ class MainActivity : AppCompatActivity() {
                 val all = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
                 if (selectedVoiceIndex >= 0 && selectedVoiceIndex < all.size) {
                     val profile = all[selectedVoiceIndex]
-                    Toast.makeText(this@MainActivity, "Probando: " + profile.name, Toast.LENGTH_SHORT).show()
-                    val pcm = withContext(Dispatchers.Default) { voiceCloner.synthesizeForTest(text, profile) }
-                    if (pcm != null && pcm.isNotEmpty()) audioPlayer.playPcm(pcm)
+                    LogManager.log("Probando voz: " + profile.name)
+                    
+                    // CORRECCIÓN: Ejecutar síntesis en hilo IO para evitar crasheo
+                    val pcm = withContext(Dispatchers.IO) { 
+                        voiceCloner.synthesizeForTest(text, profile) 
+                    }
+                    
+                    if (pcm != null && pcm.isNotEmpty()) {
+                        audioPlayer.playPcm(pcm)
+                    } else {
+                        LogManager.log("ERROR: El servidor no devolvió audio")
+                    }
                 }
             }
         }
@@ -110,11 +116,7 @@ class MainActivity : AppCompatActivity() {
             val all = voiceManager.getDefaultVoices() + voiceManager.getClonedVoices()
             if (position < all.size) {
                 val profile = all[position]
-                if (profile.isCloned) {
-                    showDeleteDialog(profile)
-                } else {
-                    Toast.makeText(this, "Las voces base no se pueden eliminar", Toast.LENGTH_SHORT).show()
-                }
+                if (profile.isCloned) showDeleteDialog(profile)
             }
             true
         }
@@ -123,54 +125,36 @@ class MainActivity : AppCompatActivity() {
     private fun showNameAndGenderDialog() {
         val builder = AlertDialog.Builder(this)
         builder.setTitle("Configurar nueva voz")
-        
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 20, 50, 20)
         }
-
-        val inputName = EditText(this).apply {
-            hint = "Nombre de la voz (ej: Papá)"
-        }
+        val inputName = EditText(this).apply { hint = "Nombre de la voz" }
         container.addView(inputName)
-
-        val labelGender = TextView(this).apply {
-            text = "Género:"
-            setPadding(0, 20, 0, 10)
-        }
-        container.addView(labelGender)
-
         val rgGender = RadioGroup(this)
         val rbFemale = RadioButton(this).apply { text = "Mujer"; id = View.generateViewId(); isChecked = true }
         val rbMale = RadioButton(this).apply { text = "Hombre"; id = View.generateViewId() }
-        rgGender.addView(rbFemale)
-        rgGender.addView(rbMale)
+        rgGender.addView(rbFemale); rgGender.addView(rbMale)
         container.addView(rgGender)
-
         builder.setView(container)
-
         builder.setPositiveButton("Clonar") { _, _ ->
             val name = inputName.text.toString().ifEmpty { "Voz Clonada" }
             val gender = if (rbMale.isChecked) Gender.MALE else Gender.FEMALE
             processVoiceCloning(name, gender)
         }
-        builder.setNegativeButton("Cancelar") { dialog, _ -> dialog.cancel() }
-        builder.show()
+        builder.setNegativeButton("Cancelar", null).show()
     }
 
     private fun showDeleteDialog(profile: VoiceProfile) {
         AlertDialog.Builder(this)
             .setTitle("Eliminar voz")
-            .setMessage("¿Estás seguro de que quieres eliminar la voz '${profile.name}'?")
+            .setMessage("¿Eliminar '" + profile.name + "'?")
             .setPositiveButton("Eliminar") { _, _ ->
                 if (voiceManager.deleteVoice(profile)) {
-                    Toast.makeText(this, "Voz eliminada", Toast.LENGTH_SHORT).show()
-                    selectedVoiceIndex = 0
                     refreshVoiceList()
                 }
             }
-            .setNegativeButton("Cancelar", null)
-            .show()
+            .setNegativeButton("Cancelar", null).show()
     }
 
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -208,12 +192,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun processVoiceCloning(customName: String, gender: Gender) {
         lifecycleScope.launch {
-            Toast.makeText(this@MainActivity, "IA analizando...", Toast.LENGTH_SHORT).show()
+            LogManager.log("Analizando identidad...")
             val embedding = voiceCloner.cloneFromAudio(audioFile!!)
             if (embedding != null) {
                 voiceManager.saveClonedVoice(embedding, customName, gender)
                 refreshVoiceList()
-                Toast.makeText(this@MainActivity, "¡Voz '\$customName' guardada!", Toast.LENGTH_SHORT).show()
+                LogManager.log("¡Voz '" + customName + "' guardada!")
             }
         }
     }
@@ -224,7 +208,7 @@ class MainActivity : AppCompatActivity() {
         for (profile in allVoices) {
             val typeStr = if (profile.isCloned) "Clonada" else "Base"
             val genderStr = if (profile.gender == Gender.MALE) "Hombre" else "Mujer"
-            voiceNames.add("${profile.name} ($genderStr - $typeStr)")
+            voiceNames.add(profile.name + " (" + genderStr + " - " + typeStr + ")")
         }
         if (::adapter.isInitialized) {
             adapter.notifyDataSetChanged()

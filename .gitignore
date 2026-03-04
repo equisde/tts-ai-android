@@ -8,6 +8,9 @@ local.properties
 /captures
 .externalNativeBuild
 .cxx
-/F5-TTS-ONNX-main
-/F5_Spanish_Model
-exportar_f5_es_onnx.py
+/server/venv
+/server/__pycache__
+/server/models/base/*.onnx
+/server/models/base/vocab.txt
+*.hprof
+gh_cli/
