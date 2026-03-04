@@ -19,7 +19,6 @@ sess_pre = None
 sess_trans = None
 sess_dec = None
 
-# Extraer el máximo poder de la CPU (90%) para el servidor
 import multiprocessing
 cpu_count = multiprocessing.cpu_count()
 num_threads = max(1, int(cpu_count * 0.9))
@@ -28,131 +27,85 @@ num_threads = max(1, int(cpu_count * 0.9))
 def load_models():
     global vocab_map, sess_pre, sess_trans, sess_dec
     if not os.path.exists(VOCAB_PATH):
-        print(f"ATENCIÓN: Falta el modelo en {MODEL_DIR}")
-        print("Debes copiar los archivos .onnx y vocab.txt a esta carpeta.")
+        print(f"ERROR: No se encuentra vocab.txt en {MODEL_DIR}")
         return
         
     with open(VOCAB_PATH, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-        for idx, line in enumerate(lines):
+        for idx, line in enumerate(f.readlines()):
             char = line.strip()
-            if char:
-                vocab_map[char[0] if len(char) > 0 else ""] = idx
+            if char: vocab_map[char[0]] = idx
                 
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = num_threads
-    opts.inter_op_num_threads = 1
-    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     
-    print(f"Cargando modelos ONNX con {num_threads} hilos de CPU (90% poder)...")
     try:
         sess_pre = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Preprocess.onnx"), opts)
         sess_trans = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Transformer.onnx"), opts)
         sess_dec = ort.InferenceSession(os.path.join(MODEL_DIR, "F5_Decode.onnx"), opts)
-        print("¡Modelos IA cargados y listos en el servidor!")
+        print(f"Servidor IA listo con {num_threads} hilos.")
     except Exception as e:
-        print(f"Error al cargar modelos: {e}")
+        print(f"Error carga: {e}")
+
+def create_tensor(session, input_name, data):
+    """Convierte datos al tipo exacto que pide el modelo ONNX."""
+    for inp in session.get_inputs():
+        if input_name in inp.name:
+            if 'int16' in inp.type:
+                # Si pide int16, escalamos floats a shorts
+                return (data * 32767).astype(np.int16)
+            elif 'float' in inp.type:
+                return data.astype(np.float32)
+            elif 'int64' in inp.type:
+                return data.astype(np.int64)
+            elif 'int32' in inp.type:
+                return data.astype(np.int32)
+    return data
 
 @app.post("/synthesize")
 async def synthesize(data: str = Form(...), audio: UploadFile = File(None)):
-    if sess_pre is None:
-        return Response(content=b"", status_code=500)
-
     req = json.loads(data)
     text = req.get("text", "")
     ref_text = req.get("reference_text", "")
     
-    # 1. Cargar el audio clonado
     if audio:
         audio_bytes = await audio.read()
-        try:
-            y, sr = librosa.load(io.BytesIO(audio_bytes), sr=24000, mono=True)
-            ref_audio_floats = y.astype(np.float32)
-        except:
-            # Si falla la decodificación, asumimos RAW PCM 16bit de Android
-            arr = np.frombuffer(audio_bytes, dtype=np.int16)
-            ref_audio_floats = arr.astype(np.float32) / 32768.0
+        y, _ = librosa.load(io.BytesIO(audio_bytes), sr=24000, mono=True)
+        ref_audio = y
     else:
-        # Silencio
-        ref_audio_floats = np.zeros(24000, dtype=np.float32)
+        ref_audio = np.zeros(24000, dtype=np.float32)
         
-    combined_text = ref_text + text
-    tokens = [vocab_map.get(c, 0) for c in combined_text]
-    tokens = np.array(tokens, dtype=np.int64)
+    tokens = np.array([vocab_map.get(c, 0) for c in (ref_text + text)], dtype=np.int64)
+    max_dur = np.array([int(len(ref_audio)/256 + 1 + len(text)*2)], dtype=np.int64)
     
-    ref_text_len = max(1, len(ref_text))
-    ref_audio_len = len(ref_audio_floats) // 256 + 1
-    max_duration = int(ref_audio_len + (ref_audio_len / ref_text_len * len(text)))
-    
-    # --- ETAPA A: PREPROCESS ---
-    pre_inputs = {
-        "audio": np.expand_dims(ref_audio_floats, axis=(0,1)).astype(np.float32),
-        "text_ids": np.expand_dims(tokens, axis=0).astype(np.int64),
-        "max_duration": np.array([max_duration], dtype=np.int64)
-    }
-    
-    actual_pre_inputs = {}
+    # ETAPA A: Preprocess con auto-casting
+    pre_inputs = {}
     for inp in sess_pre.get_inputs():
-        for k, v in pre_inputs.items():
-            if k in inp.name:
-                if 'int32' in inp.type: v = v.astype(np.int32)
-                elif 'float' in inp.type: v = v.astype(np.float32)
-                elif 'int64' in inp.type: v = v.astype(np.int64)
-                actual_pre_inputs[inp.name] = v
+        if 'audio' in inp.name: pre_inputs[inp.name] = create_tensor(sess_pre, 'audio', np.expand_dims(ref_audio, axis=(0,1)))
+        if 'text_ids' in inp.name: pre_inputs[inp.name] = create_tensor(sess_pre, 'text_ids', np.expand_dims(tokens, axis=0))
+        if 'max_duration' in inp.name: pre_inputs[inp.name] = create_tensor(sess_pre, 'max_duration', max_dur)
 
-    pre_outs = sess_pre.run(None, actual_pre_inputs)
+    pre_outs = sess_pre.run(None, pre_inputs)
     noise = pre_outs[0]
+    ref_len = pre_outs[7]
     
-    support_tensors = {}
-    support_keys = ["rope_cos_q", "rope_sin_q", "rope_cos_k", "rope_sin_k", "cat_mel_text", "cat_mel_text_drop"]
-    for i, key in enumerate(support_keys):
-        support_tensors[key] = pre_outs[i+1]
-    ref_signal_len = pre_outs[7]
-    
-    # --- ETAPA B: TRANSFORMER LOOP ---
-    steps = 32
-    time_step_val = 0
-    for step in range(steps):
-        trans_inputs = {k: v for k, v in support_tensors.items()}
-        trans_inputs["noise"] = noise
-        trans_inputs["time_step"] = np.array([time_step_val], dtype=np.int64)
+    # ETAPA B: Transformer
+    for step in range(32):
+        trans_inputs = {inp.name: pre_outs[i+1] for i, inp in enumerate(sess_trans.get_inputs()) if i < 6}
+        trans_inputs[sess_trans.get_inputs()[6].name] = noise
+        trans_inputs[sess_trans.get_inputs()[7].name] = create_tensor(sess_trans, 'time_step', np.array([step]))
         
-        actual_trans_inputs = {}
-        for inp in sess_trans.get_inputs():
-            for k, v in trans_inputs.items():
-                if k in inp.name:
-                    actual_trans_inputs[inp.name] = v
-                    break
-                    
-        trans_outs = sess_trans.run(None, actual_trans_inputs)
-        noise = trans_outs[0]
-        time_step_val += 1
+        noise = sess_trans.run(None, trans_inputs)[0]
         
-    # --- ETAPA C: DECODE ---
-    dec_inputs = {"denoised": noise, "ref_signal_len": ref_signal_len}
-    actual_dec_inputs = {}
+    # ETAPA C: Decode
+    dec_inputs = {}
     for inp in sess_dec.get_inputs():
-        for k, v in dec_inputs.items():
-            if k in inp.name:
-                actual_dec_inputs[inp.name] = v
-                break
-                
-    dec_outs = sess_dec.run(None, actual_dec_inputs)
-    audio_out = dec_outs[0]
-    
-    # Convertir a RAW PCM 16-bit 24kHz
-    if audio_out.dtype == np.float32:
-        audio_out = np.clip(audio_out, -1.0, 1.0)
-        pcm = (audio_out * 32767).astype(np.int16).tobytes()
-    elif audio_out.dtype == np.int16:
-        pcm = audio_out.tobytes()
-    else:
-        pcm = audio_out.astype(np.float32).clip(-1.0, 1.0)
-        pcm = (pcm * 32767).astype(np.int16).tobytes()
+        if 'denoised' in inp.name: dec_inputs[inp.name] = noise
+        if 'ref_signal_len' in inp.name: dec_inputs[inp.name] = ref_len
         
+    audio_out = sess_dec.run(None, dec_inputs)[0]
+    pcm = (audio_out.flatten() * 32767).astype(np.int16).tobytes()
     return Response(content=pcm, media_type="audio/pcm")
 
 if __name__ == "__main__":
     import uvicorn
-    # Lanzar el servidor en todas las interfaces de red de la PC (0.0.0.0)
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
