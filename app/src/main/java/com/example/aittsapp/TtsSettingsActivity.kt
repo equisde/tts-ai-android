@@ -3,6 +3,7 @@ package com.example.aittsapp
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.Toast
@@ -21,10 +22,21 @@ class TtsSettingsActivity : AppCompatActivity() {
 
         voiceManager = VoiceManager(this)
         
+        val sharedPrefs = getSharedPreferences("TTS_PREFS", Context.MODE_PRIVATE)
+        
+        val etServerUrl = findViewById<EditText>(R.id.etServerUrl)
+        val btnSaveServer = findViewById<MaterialButton>(R.id.btnSaveServer)
+        
+        etServerUrl.setText(sharedPrefs.getString("SERVER_URL", "http://192.168.1.100:8000"))
+        
+        btnSaveServer.setOnClickListener {
+            sharedPrefs.edit().putString("SERVER_URL", etServerUrl.text.toString()).apply()
+            Toast.makeText(this, "Servidor guardado. Reinicia la app para aplicar.", Toast.LENGTH_LONG).show()
+        }
+
         val rgVoices = findViewById<RadioGroup>(R.id.rgVoices)
         val btnManage = findViewById<MaterialButton>(R.id.btnManageVoices)
         
-        val sharedPrefs = getSharedPreferences("TTS_PREFS", Context.MODE_PRIVATE)
         val selectedVoiceId = sharedPrefs.getString("DEFAULT_VOICE_ID", "cl-female-base")
         
         val swHighQuality = findViewById<com.google.android.material.switchmaterial.SwitchMaterial>(R.id.swHighQuality)

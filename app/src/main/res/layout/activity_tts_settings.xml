@@ -32,6 +32,53 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:text="Conexión al Servidor IA"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:textColor="?attr/colorPrimary"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="La IP del computador que corre el servidor FastAPI."
+                android:textSize="14sp"
+                android:layout_marginBottom="12dp"
+                android:textColor="?android:attr/textColorSecondary"/>
+
+            <EditText
+                android:id="@+id/etServerUrl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="http://192.168.1.X:8000"
+                android:inputType="textUri"
+                android:textColor="?android:attr/textColorPrimary"/>
+                
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSaveServer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Guardar Servidor"/>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        app:cardBackgroundColor="?attr/colorSurface"
+        app:cardCornerRadius="12dp"
+        app:cardElevation="4dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
                 android:text="Voz Predeterminada del Sistema"
                 android:textSize="16sp"
                 android:textStyle="bold"

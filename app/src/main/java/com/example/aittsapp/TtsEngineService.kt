@@ -7,7 +7,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.TextToSpeechService
 import android.speech.tts.Voice
 import android.util.Log
-import com.example.aittsapp.ai.OnnxTtsEngine
+import com.example.aittsapp.ai.ApiTtsEngine
 import com.example.aittsapp.ai.TtsEngine
 import com.example.aittsapp.ai.VoiceManager
 import com.example.aittsapp.ai.VoiceProfile
@@ -24,14 +24,13 @@ class TtsEngineService : TextToSpeechService() {
     override fun onCreate() {
         super.onCreate()
         voiceManager = VoiceManager(applicationContext)
-        // La inicialización pesada de modelos ONNX (1.4GB) DEBE estar en un hilo secundario
         Thread {
             try {
-                ttsEngine = OnnxTtsEngine()
+                ttsEngine = ApiTtsEngine()
                 ttsEngine.initialize(applicationContext)
-                Log.i(TAG, "Motor ONNX inicializado en hilo secundario.")
+                Log.i(TAG, "Motor API inicializado.")
             } catch (e: Exception) {
-                Log.e(TAG, "Error crítico al inicializar IA", e)
+                Log.e(TAG, "Error crítico al inicializar IA API", e)
             }
         }.start()
     }

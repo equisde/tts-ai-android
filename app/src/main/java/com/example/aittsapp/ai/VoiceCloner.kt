@@ -12,19 +12,18 @@ import java.io.File
  */
 class VoiceCloner(private val context: android.content.Context) {
     private val TAG = "VoiceCloner"
-    private val ttsEngine = OnnxTtsEngine()
+    private val ttsEngine = ApiTtsEngine()
 
     init {
         ttsEngine.initialize(context)
     }
 
     /**
-     * Procesa un archivo de audio (WAV/MP3) de ~30 segundos.
-     * Devuelve el embedding vocal que representa la identidad del hablante.
+     * Devuelve un embedding simulado, ya que el audio real se enviará al servidor
+     * para clonación "Zero-Shot" en cada síntesis.
      */
     suspend fun cloneFromAudio(audioFile: File): FloatArray? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-        Log.i(TAG, "Iniciando proceso de clonación para: \${audioFile.absolutePath}")
-        // Simulación de retorno de embedding
+        Log.i(TAG, "Guardando perfil para: \${audioFile.absolutePath}")
         FloatArray(256) { (Math.random() * 2 - 1).toFloat() }
     }
 
